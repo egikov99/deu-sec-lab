@@ -1,24 +1,58 @@
+version: '3.9'
+
 services:
-  security-lab:
-    image: ghcr.io/egikov99/deu-sec-lab:latest
-    container_name: deu-security-lab
-    restart: unless-stopped
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5}
-      TZ: ${TZ:-Europe/Warsaw}
-    stdin_open: true
-    tty: true
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: ghcr.io/egikov99/deu-sec-lab-api:latest
+    container_name: deu-sec-platform-api
+    env_file:
+      - .env
     volumes:
-      - workspace:/workspace
-      - reports:/reports
-      - results:/results
-      - nuclei-data:/root/.local/share/nuclei
-      - codex-data:/root/.codex
+      - ./data:/data
+      - ./reports:/reports
+    ports:
+      - '8000:8000'
+    depends_on:
+      - redis
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: ghcr.io/egikov99/deu-sec-lab-web:latest
+    container_name: deu-sec-platform-web
+    env_file:
+      - .env
+    ports:
+      - '3000:3000'
+    depends_on:
+      - api
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    image: ghcr.io/egikov99/deu-sec-lab-worker:latest
+    container_name: deu-sec-platform-worker
+    env_file:
+      - .env
+    volumes:
+      - ./reports:/reports
+      - ./data:/data
+      - ./shared:/app/shared
+    depends_on:
+      - api
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: deu-sec-platform-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
 
 volumes:
-  workspace:
-  reports:
-  results:
-  nuclei-data:
-  codex-data:
+  redis-data:
