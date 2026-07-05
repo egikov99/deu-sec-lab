@@ -3,8 +3,8 @@ version: '3.9'
 services:
   api:
     build:
-      context: ./api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api/Dockerfile
     image: ghcr.io/egikov99/deu-sec-lab-api:latest
     container_name: deu-sec-platform-api
     env_file:
@@ -32,8 +32,8 @@ services:
 
   worker:
     build:
-      context: ./worker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: worker/Dockerfile
     image: ghcr.io/egikov99/deu-sec-lab-worker:latest
     container_name: deu-sec-platform-worker
     env_file:
