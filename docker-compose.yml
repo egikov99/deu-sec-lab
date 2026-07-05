@@ -16,22 +16,6 @@ services:
       - nuclei-data:/root/.local/share/nuclei
       - codex-data:/root/.codex
 
-  security-api:
-    build:
-      context: .
-      dockerfile: security-api/Dockerfile
-    container_name: deu-security-api
-    restart: unless-stopped
-    ports:
-      - "8088:8088"
-    environment:
-      TZ: ${TZ:-Europe/Warsaw}
-    volumes:
-      - workspace:/workspace
-      - reports:/reports
-      - results:/results
-      - nuclei-data:/root/.local/share/nuclei
-
 volumes:
   workspace:
   reports:
