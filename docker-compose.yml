@@ -1,0 +1,30 @@
+services:
+  security-lab:
+    container_name: deu-security-lab
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5}
+      TZ: ${TZ:-Europe/Warsaw}
+    stdin_open: true
+    tty: true
+    volumes:
+      - security_workspace:/workspace
+      - security_reports:/reports
+      - security_results:/results
+      - nuclei_data:/root/.local/share/nuclei
+      - codex_data:/root/.codex
+      - bughunter_data:/root/.agents
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  security_workspace:
+  security_reports:
+  security_results:
+  nuclei_data:
+  codex_data:
+  bughunter_data:
