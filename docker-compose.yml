@@ -1,6 +1,6 @@
 services:
   security-lab:
-    image: ghcr.io/egikov/deu-sec-lab:latest
+    image: ghcr.io/egikov99/deu-sec-lab:latest
     container_name: deu-security-lab
     restart: unless-stopped
     environment:
