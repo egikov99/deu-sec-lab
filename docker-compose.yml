@@ -3,8 +3,10 @@ services:
     image: ghcr.io/egikov/deu-sec-lab:latest
     container_name: deu-security-lab
     restart: unless-stopped
-    env_file:
-      - stack.env
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5}
+      TZ: ${TZ:-Europe/Warsaw}
     stdin_open: true
     tty: true
     volumes:
