@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip pipx \
     nodejs npm golang-go \
     nmap jq whois dnsutils \
-    sqlmap amass \
+    sqlmap \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @openai/codex
