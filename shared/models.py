@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from sqlalchemy import String, Text, Integer, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -34,7 +34,7 @@ class Scan(Base):
     scan_type: Mapped[str] = mapped_column(String(50), default="basic")
     logs: Mapped[str] = mapped_column(Text, default="")
     summary: Mapped[Optional[str]] = mapped_column(Text, default="")
-    findings: Mapped[Optional[dict]] = mapped_column(JSON, default=list)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     report_dir: Mapped[Optional[str]] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

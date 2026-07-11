@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'DEU Security Platform',
-  description: 'Internal security validation portal for projects and scans.',
+  title: 'DEU Security Lab',
+  description: 'Internal web panel for project security checks.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import { Download } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export default function ReportPage() {
@@ -25,6 +26,16 @@ export default function ReportPage() {
         </CardHeader>
         <CardContent>
           <div className="space-y-6">
+            {report.files?.length ? (
+              <div className="flex flex-wrap gap-2">
+                {report.files.map((file: string) => (
+                  <a key={file} href={api.reportDownloadUrl(report.scan_id, file)} className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-300">
+                    <Download className="h-4 w-4" />
+                    {file}
+                  </a>
+                ))}
+              </div>
+            ) : null}
             <div>
               <h2 className="mb-2 text-lg font-semibold text-white">Summary</h2>
               <p className="whitespace-pre-wrap text-sm text-slate-400">{report.summary}</p>

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { ExternalLink, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Download, ExternalLink, Play, ShieldCheck } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -65,8 +65,9 @@ export default function ProjectDetailPage() {
           <p className="text-sm uppercase tracking-[0.3em] text-cyan-400">Project details</p>
           <h1 className="text-3xl font-semibold">{project.name}</h1>
         </div>
-        <Button onClick={startScan} disabled={loading}>
-          {loading ? 'Starting…' : 'Run security check'}
+        <Button onClick={startScan} disabled={loading} className="inline-flex items-center gap-2">
+          <Play className="h-4 w-4" />
+          {loading ? 'Starting...' : 'Проверить безопасность'}
         </Button>
       </div>
 
@@ -143,14 +144,18 @@ export default function ProjectDetailPage() {
             <CardTitle>Report files</CardTitle>
           </CardHeader>
           <CardContent>
-            {scan?.report_dir ? (
+            {scan?.files?.length ? (
               <div className="space-y-3">
-                {['summary.md', 'report.html', 'raw.json', 'findings.json', 'report.pdf'].map((file) => (
-                  <a key={file} href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/reports/${scan.id}/download/${file}`} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-300">
+                {scan.files.map((file: string) => (
+                  <a key={file} href={api.reportDownloadUrl(scan.id, file)} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-300">
                     <span>{file}</span>
-                    <ExternalLink className="h-4 w-4" />
+                    <Download className="h-4 w-4" />
                   </a>
                 ))}
+                <Link href={`/reports/${scan.id}`} className="flex items-center justify-between rounded-lg border border-cyan-700/50 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-200">
+                  <span>Open report view</span>
+                  <ExternalLink className="h-4 w-4" />
+                </Link>
               </div>
             ) : (
               <p className="text-sm text-slate-400">Reports will appear once the scan completes.</p>
@@ -176,8 +181,10 @@ export default function ProjectDetailPage() {
                     <p className="mb-3 text-sm text-slate-400">{finding.description}</p>
                     <div className="space-y-2 text-sm text-slate-500">
                       <div><span className="text-slate-300">Recommendation:</span> {finding.recommendation}</div>
-                      <div><span className="text-slate-300">Evidence:</span> {finding.evidence}</div>
-                      <div><span className="text-slate-300">Tool output:</span> {finding.raw_output}</div>
+                      <div><span className="text-slate-300">Technical details:</span></div>
+                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">{JSON.stringify(finding.technical_details || {}, null, 2)}</pre>
+                      <div><span className="text-slate-300">Raw output:</span></div>
+                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">{JSON.stringify(finding.raw_output || {}, null, 2)}</pre>
                     </div>
                   </motion.div>
                 ))}

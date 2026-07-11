@@ -7,3 +7,5 @@ rq==1.17.0
 requests==2.32.0
 python-dotenv==1.0.1
 reportlab==4.2.0
+openai==1.59.7
+psycopg[binary]==3.2.3

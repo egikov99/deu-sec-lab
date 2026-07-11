@@ -2,8 +2,7 @@
 
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { ShieldCheck, ArrowRight } from 'lucide-react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ArrowRight, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 export default function HomePage() {
@@ -12,15 +11,15 @@ export default function HomePage() {
       <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-8">
         <div className="flex items-center gap-3 text-cyan-400">
           <ShieldCheck className="h-8 w-8" />
-          <span className="text-lg font-semibold">DEU Security Platform</span>
+          <span className="text-lg font-semibold">DEU Security Lab</span>
         </div>
 
         <div className="space-y-4">
           <h1 className="max-w-3xl text-4xl font-semibold tracking-tight sm:text-6xl">
-            Internal security validation, simplified.
+            Internal web panel for safe security checks.
           </h1>
           <p className="max-w-2xl text-lg text-slate-400">
-            Create a project, add a target, run a scan, and review findings without needing a complex enterprise stack.
+            Create a project, add a target URL or domain, run one whitelisted scan, and review reports from the browser.
           </p>
         </div>
 
@@ -31,33 +30,6 @@ export default function HomePage() {
           <Link href="/projects/new">
             <Button variant="secondary">Create project</Button>
           </Link>
-        </div>
-
-        <div className="grid gap-6 md:grid-cols-3">
-          <Card>
-            <CardHeader>
-              <CardTitle>Projects</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-slate-400">Organize each internal target and keep scan history together.</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Scan progress</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-slate-400">Track queued, running, completed, and failed checks in real time.</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Reports</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-slate-400">Download Markdown, HTML, JSON, and PDF reports after each scan.</p>
-            </CardContent>
-          </Card>
         </div>
       </motion.div>
     </main>

@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/root/go/bin:/root/.local/bin:${PATH}"
+ARG CLAUDE_BUGHUNTER_REPO=""
+ARG CLAUDE_BUGHUNTER_REF="main"
 
 RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/projectdiscovery/katana/cmd/katana@latest && \
@@ -20,6 +22,11 @@ RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
     nuclei -update-templates || true
+
+RUN mkdir -p /opt/methodology && \
+    if [ -n "$CLAUDE_BUGHUNTER_REPO" ]; then \
+      git clone --depth 1 --branch "$CLAUDE_BUGHUNTER_REF" "$CLAUDE_BUGHUNTER_REPO" /opt/methodology/Claude-BugHunter || true; \
+    fi
 
 WORKDIR /app
 COPY worker/requirements.txt ./requirements.txt

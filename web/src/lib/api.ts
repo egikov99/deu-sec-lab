@@ -16,6 +16,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  baseUrl: API_BASE,
   health: () => request<{ status: string }>('/health'),
   listProjects: () => request<any[]>('/api/projects'),
   createProject: (payload: unknown) => request<any>('/api/projects', { method: 'POST', body: JSON.stringify(payload) }),
@@ -23,4 +24,5 @@ export const api = {
   startScan: (id: number) => request<any>(`/api/projects/${id}/scan`, { method: 'POST' }),
   getScan: (id: number) => request<any>(`/api/scans/${id}`),
   getReport: (id: number) => request<any>(`/api/reports/${id}`),
+  reportDownloadUrl: (scanId: number, filename: string) => `${API_BASE}/api/reports/${scanId}/download/${filename}`,
 };

@@ -1,12 +1,7 @@
-version: '3.9'
-
 services:
   api:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
     image: ghcr.io/egikov99/deu-sec-lab-api:latest
-    container_name: deu-sec-platform-api
+    container_name: deu-sec-lab-api
     env_file:
       - .env
     volumes:
@@ -18,11 +13,8 @@ services:
       - redis
 
   web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
     image: ghcr.io/egikov99/deu-sec-lab-web:latest
-    container_name: deu-sec-platform-web
+    container_name: deu-sec-lab-web
     env_file:
       - .env
     ports:
@@ -31,24 +23,20 @@ services:
       - api
 
   worker:
-    build:
-      context: .
-      dockerfile: worker/Dockerfile
     image: ghcr.io/egikov99/deu-sec-lab-worker:latest
-    container_name: deu-sec-platform-worker
+    container_name: deu-sec-lab-worker
     env_file:
       - .env
     volumes:
       - ./reports:/reports
       - ./data:/data
-      - ./shared:/app/shared
     depends_on:
       - api
       - redis
 
   redis:
     image: redis:7-alpine
-    container_name: deu-sec-platform-redis
+    container_name: deu-sec-lab-redis
     ports:
       - '6379:6379'
     volumes:

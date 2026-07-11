@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from shared.db import engine, SessionLocal
 from shared.models import Project, Scan
+from shared.target import validate_target
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 REPORTS_ROOT = os.getenv("REPORTS_ROOT", "/reports")
@@ -34,7 +35,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     target: str = Field(min_length=1)
     description: str = ""
-    scan_type: str = "basic"
+    scan_type: str = Field(default="basic", pattern="^(basic|extended)$")
 
 
 class ScanStatusUpdate(BaseModel):
@@ -72,6 +73,37 @@ def get_queue() -> Queue:
     return Queue(connection=Redis.from_url(REDIS_URL), default_timeout=3600)
 
 
+def report_files(report_dir: str | None) -> list[str]:
+    if not report_dir:
+        return []
+    root = os.path.join(REPORTS_ROOT, report_dir)
+    return [
+        name
+        for name in ["summary.md", "report.html", "raw.json", "findings.json", "logs.txt", "report.pdf"]
+        if os.path.exists(os.path.join(root, name))
+    ]
+
+
+def scan_payload(scan: Scan) -> dict:
+    return {
+        "id": scan.id,
+        "project_id": scan.project_id,
+        "status": scan.status,
+        "current_step": scan.current_step,
+        "progress": scan.progress,
+        "scan_type": scan.scan_type,
+        "target": scan.target,
+        "logs": scan.logs,
+        "summary": scan.summary,
+        "findings": scan.findings or [],
+        "report_dir": scan.report_dir,
+        "files": report_files(scan.report_dir),
+        "created_at": scan.created_at.isoformat(),
+        "started_at": scan.started_at.isoformat() if scan.started_at else None,
+        "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -95,9 +127,14 @@ def list_projects(db: Session = Depends(get_db)):
 
 @app.post("/api/projects", status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
+    try:
+        target = validate_target(payload.target, allow_private=ALLOW_PRIVATE_TARGETS)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     project = Project(
         name=payload.name,
-        target=payload.target,
+        target=target.url,
         description=payload.description,
         scan_type=payload.scan_type,
     )
@@ -122,37 +159,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
             "scan_type": project.scan_type,
             "created_at": project.created_at.isoformat(),
         },
-        "latest_scan": None if not scans else {
-            "id": scans[0].id,
-            "status": scans[0].status,
-            "current_step": scans[0].current_step,
-            "progress": scans[0].progress,
-            "scan_type": scans[0].scan_type,
-            "logs": scans[0].logs,
-            "summary": scans[0].summary,
-            "findings": scans[0].findings or [],
-            "report_dir": scans[0].report_dir,
-            "created_at": scans[0].created_at.isoformat(),
-            "started_at": scans[0].started_at.isoformat() if scans[0].started_at else None,
-            "finished_at": scans[0].finished_at.isoformat() if scans[0].finished_at else None,
-        },
-        "scans": [
-            {
-                "id": scan.id,
-                "status": scan.status,
-                "current_step": scan.current_step,
-                "progress": scan.progress,
-                "scan_type": scan.scan_type,
-                "logs": scan.logs,
-                "summary": scan.summary,
-                "findings": scan.findings or [],
-                "report_dir": scan.report_dir,
-                "created_at": scan.created_at.isoformat(),
-                "started_at": scan.started_at.isoformat() if scan.started_at else None,
-                "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
-            }
-            for scan in scans
-        ],
+        "latest_scan": None if not scans else scan_payload(scans[0]),
+        "scans": [scan_payload(scan) for scan in scans],
     }
 
 
@@ -177,22 +185,7 @@ def get_scan(scan_id: int, db: Session = Depends(get_db)):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return {
-        "id": scan.id,
-        "project_id": scan.project_id,
-        "status": scan.status,
-        "current_step": scan.current_step,
-        "progress": scan.progress,
-        "scan_type": scan.scan_type,
-        "target": scan.target,
-        "logs": scan.logs,
-        "summary": scan.summary,
-        "findings": scan.findings or [],
-        "report_dir": scan.report_dir,
-        "created_at": scan.created_at.isoformat(),
-        "started_at": scan.started_at.isoformat() if scan.started_at else None,
-        "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
-    }
+    return scan_payload(scan)
 
 
 @app.post("/api/scans/{scan_id}/status")
@@ -269,11 +262,14 @@ def get_report(scan_id: int, db: Session = Depends(get_db)):
             findings = json.load(fh)
     else:
         findings = scan.findings or []
-    return {"scan_id": scan.id, "summary": scan.summary, "markdown": markdown, "findings": findings}
+    return {"scan_id": scan.id, "summary": scan.summary, "markdown": markdown, "findings": findings, "files": report_files(report_dir)}
 
 
 @app.get("/api/reports/{scan_id}/download/{filename}")
 def download_report(scan_id: int, filename: str, db: Session = Depends(get_db)):
+    allowed_files = {"summary.md", "report.html", "raw.json", "findings.json", "logs.txt", "report.pdf"}
+    if filename not in allowed_files:
+        raise HTTPException(status_code=400, detail="Unsupported report file")
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
