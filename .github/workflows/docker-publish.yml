@@ -33,7 +33,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./web
-          file: Dockerfile
+          file: ./web/Dockerfile
           push: true
           tags: ghcr.io/egikov99/deu-sec-lab-web:latest
       - name: Build and push Worker image
