@@ -1,8 +1,11 @@
 services:
   web:
     image: ghcr.io/egikov99/deu-sec-lab-web:latest
+    pull_policy: always
     container_name: deu-sec-lab-web
     environment:
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:8000}
       NEXT_TELEMETRY_DISABLED: "1"
       TZ: ${TZ:-Europe/Warsaw}
@@ -27,6 +30,7 @@ services:
 
   api:
     image: ghcr.io/egikov99/deu-sec-lab-api:latest
+    pull_policy: always
     container_name: deu-sec-lab-api
     environment:
       DATABASE_URL: ${DATABASE_URL}
@@ -61,6 +65,7 @@ services:
 
   worker:
     image: ghcr.io/egikov99/deu-sec-lab-worker:latest
+    pull_policy: always
     container_name: deu-sec-lab-worker
     environment:
       DATABASE_URL: ${DATABASE_URL}
