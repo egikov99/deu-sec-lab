@@ -1,46 +1,134 @@
 services:
-  api:
-    image: ghcr.io/egikov99/deu-sec-lab-api:latest
-    container_name: deu-sec-lab-api
-    env_file:
-      - .env
-    volumes:
-      - ./data:/data
-      - ./reports:/reports
-    ports:
-      - '8000:8000'
-    depends_on:
-      - redis
-
   web:
     image: ghcr.io/egikov99/deu-sec-lab-web:latest
     container_name: deu-sec-lab-web
-    env_file:
-      - .env
-    ports:
-      - '3000:3000'
+    environment:
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:8000}
+      NEXT_TELEMETRY_DISABLED: "1"
+      TZ: ${TZ:-Europe/Warsaw}
+    expose:
+      - "3000"
+    networks:
+      - internal
+      - proxy
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  api:
+    image: ghcr.io/egikov99/deu-sec-lab-api:latest
+    container_name: deu-sec-lab-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REPORTS_ROOT: ${REPORTS_ROOT:-/reports}
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SECRET_KEY: ${SECRET_KEY:-change_me}
+      TZ: ${TZ:-Europe/Warsaw}
+    expose:
+      - "8000"
+    volumes:
+      - reports-data:/reports
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   worker:
     image: ghcr.io/egikov99/deu-sec-lab-worker:latest
     container_name: deu-sec-lab-worker
-    env_file:
-      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REPORTS_ROOT: ${REPORTS_ROOT:-/reports}
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      NMAP_ALLOWED_PORTS: ${NMAP_ALLOWED_PORTS:-80,443,8080,8443}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SECRET_KEY: ${SECRET_KEY:-change_me}
+      TZ: ${TZ:-Europe/Warsaw}
     volumes:
-      - ./reports:/reports
-      - ./data:/data
+      - reports-data:/reports
+    networks:
+      - internal
     depends_on:
-      - api
-      - redis
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: deu-sec-lab-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-deu_sec_lab}
+      POSTGRES_USER: ${POSTGRES_USER:-deu_sec_lab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      TZ: ${TZ:-Europe/Warsaw}
+    expose:
+      - "5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
     container_name: deu-sec-lab-redis
-    ports:
-      - '6379:6379'
+    expose:
+      - "6379"
     volumes:
       - redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
 volumes:
+  reports-data:
+  postgres-data:
   redis-data:
+
+networks:
+  internal:
+    driver: bridge
+  proxy:
+    external: true
+    name: proxy
