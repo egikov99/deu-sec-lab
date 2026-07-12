@@ -12,14 +12,16 @@ from sqlalchemy.orm import Session
 
 from shared.db import engine, SessionLocal
 from shared.models import Project, Scan
+from shared.schema import ensure_schema
 from shared.target import validate_target
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 REPORTS_ROOT = os.getenv("REPORTS_ROOT", "/reports")
 ALLOW_PRIVATE_TARGETS = os.getenv("ALLOW_PRIVATE_TARGETS", "false").lower() == "true"
 
-Project.metadata.create_all(bind=engine)
-Scan.metadata.create_all(bind=engine)
+ensure_schema()
+
+SCAN_STATUSES = {"queued", "running", "completed", "completed_with_warnings", "failed", "cancelled"}
 
 app = FastAPI(title="DEU Security API")
 app.add_middleware(
@@ -36,6 +38,8 @@ class ProjectCreate(BaseModel):
     target: str = Field(min_length=1)
     description: str = ""
     scan_type: str = Field(default="basic", pattern="^(basic|extended)$")
+    origin_ip: Optional[str] = None
+    origin_scan_confirmed: bool = False
 
 
 class ScanStatusUpdate(BaseModel):
@@ -77,11 +81,10 @@ def report_files(report_dir: str | None) -> list[str]:
     if not report_dir:
         return []
     root = os.path.join(REPORTS_ROOT, report_dir)
-    return [
-        name
-        for name in ["summary.md", "report.html", "raw.json", "findings.json", "logs.txt", "report.pdf"]
-        if os.path.exists(os.path.join(root, name))
-    ]
+    allowed = {"summary.md", "report.html", "raw.json", "normalized.json", "metadata.json", "findings.json", "logs.txt", "report.pdf"}
+    files = [name for name in allowed if os.path.exists(os.path.join(root, name))]
+    files.extend(sorted(name for name in os.listdir(root) if name.endswith((".log", ".out"))))
+    return sorted(files)
 
 
 def scan_payload(scan: Scan) -> dict:
@@ -96,6 +99,10 @@ def scan_payload(scan: Scan) -> dict:
         "logs": scan.logs,
         "summary": scan.summary,
         "findings": scan.findings or [],
+        "warnings": scan.warnings or [],
+        "tool_status": scan.tool_status or {},
+        "normalized_outputs": scan.normalized_outputs or {},
+        "scan_metadata": scan.scan_metadata or {},
         "report_dir": scan.report_dir,
         "files": report_files(scan.report_dir),
         "created_at": scan.created_at.isoformat(),
@@ -119,6 +126,8 @@ def list_projects(db: Session = Depends(get_db)):
             "target": project.target,
             "description": project.description,
             "scan_type": project.scan_type,
+            "origin_ip": project.origin_ip,
+            "origin_scan_confirmed": bool(project.origin_scan_confirmed),
             "created_at": project.created_at.isoformat(),
         }
         for project in projects
@@ -129,6 +138,12 @@ def list_projects(db: Session = Depends(get_db)):
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     try:
         target = validate_target(payload.target, allow_private=ALLOW_PRIVATE_TARGETS)
+        origin_ip = None
+        if payload.origin_ip:
+            origin = validate_target(payload.origin_ip, allow_private=ALLOW_PRIVATE_TARGETS)
+            if not origin.is_ip:
+                raise ValueError("origin_ip must be an IP address")
+            origin_ip = origin.host
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -137,11 +152,21 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
         target=target.url,
         description=payload.description,
         scan_type=payload.scan_type,
+        origin_ip=origin_ip,
+        origin_scan_confirmed=payload.origin_scan_confirmed,
     )
     db.add(project)
     db.commit()
     db.refresh(project)
-    return {"id": project.id, "name": project.name, "target": project.target, "description": project.description, "scan_type": project.scan_type}
+    return {
+        "id": project.id,
+        "name": project.name,
+        "target": project.target,
+        "description": project.description,
+        "scan_type": project.scan_type,
+        "origin_ip": project.origin_ip,
+        "origin_scan_confirmed": bool(project.origin_scan_confirmed),
+    }
 
 
 @app.get("/api/projects/{project_id}")
@@ -157,6 +182,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
             "target": project.target,
             "description": project.description,
             "scan_type": project.scan_type,
+            "origin_ip": project.origin_ip,
+            "origin_scan_confirmed": bool(project.origin_scan_confirmed),
             "created_at": project.created_at.isoformat(),
         },
         "latest_scan": None if not scans else scan_payload(scans[0]),
@@ -193,6 +220,8 @@ def update_scan_status(scan_id: int, payload: ScanStatusUpdate, db: Session = De
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    if payload.status not in SCAN_STATUSES:
+        raise HTTPException(status_code=400, detail="Unsupported scan status")
     scan.status = payload.status
     scan.current_step = payload.current_step or scan.current_step
     if payload.progress is not None:
@@ -201,7 +230,7 @@ def update_scan_status(scan_id: int, payload: ScanStatusUpdate, db: Session = De
         scan.logs = (scan.logs or "") + f"[{datetime.now(timezone.utc).isoformat()}] {payload.message}\n"
     if payload.status == "running" and not scan.started_at:
         scan.started_at = datetime.now(timezone.utc)
-    if payload.status in {"completed", "failed"}:
+    if payload.status in {"completed", "completed_with_warnings", "failed", "cancelled"}:
         scan.finished_at = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}
@@ -262,13 +291,22 @@ def get_report(scan_id: int, db: Session = Depends(get_db)):
             findings = json.load(fh)
     else:
         findings = scan.findings or []
-    return {"scan_id": scan.id, "summary": scan.summary, "markdown": markdown, "findings": findings, "files": report_files(report_dir)}
+    return {
+        "scan_id": scan.id,
+        "summary": scan.summary,
+        "markdown": markdown,
+        "findings": findings,
+        "warnings": scan.warnings or [],
+        "tool_status": scan.tool_status or {},
+        "normalized_outputs": scan.normalized_outputs or {},
+        "scan_metadata": scan.scan_metadata or {},
+        "files": report_files(report_dir),
+    }
 
 
 @app.get("/api/reports/{scan_id}/download/{filename}")
 def download_report(scan_id: int, filename: str, db: Session = Depends(get_db)):
-    allowed_files = {"summary.md", "report.html", "raw.json", "findings.json", "logs.txt", "report.pdf"}
-    if filename not in allowed_files:
+    if "/" in filename or "\\" in filename or not filename.endswith((".md", ".html", ".json", ".txt", ".pdf", ".log", ".out")):
         raise HTTPException(status_code=400, detail="Unsupported report file")
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:

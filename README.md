@@ -15,7 +15,7 @@ No multi-tenant SaaS, billing, marketplace, RBAC, Kubernetes, host scanning, or 
 ## User Flow
 
 1. Open the web panel.
-2. Create a project with name, target URL/domain/IP, description, and scan type.
+2. Create a project with name, target URL/domain/IP, description, scan type, and optional origin IP authorization.
 3. Open the project details page.
 4. Click `Проверить безопасность`.
 5. Watch status, progress, current step, and logs.
@@ -49,6 +49,9 @@ Extended scan:
 - Worker commands are built from a fixed whitelist: `httpx`, `katana`, `nuclei`, `subfinder`, `dnsx`, `nmap`.
 - Targets are normalized and validated server-side.
 - Private, local, loopback, link-local, and multicast targets are blocked unless `ALLOW_PRIVATE_TARGETS=true`.
+- Nmap results against Cloudflare/CDN infrastructure are marked as public edge exposure and are not attributed to the origin server.
+- Origin infrastructure scans run only when an origin IP is explicitly configured and authorization is confirmed.
+- Nuclei templates are initialized under the worker user's persistent data directory and validated before scans.
 
 ## Reports
 
@@ -63,6 +66,8 @@ Generated files:
 - `summary.md`
 - `report.html`
 - `raw.json`
+- `normalized.json`
+- `metadata.json`
 - `findings.json`
 - `logs.txt`
 - `report.pdf` when PDF generation succeeds
@@ -70,6 +75,7 @@ Generated files:
 ## Claude-BugHunter Methodology
 
 The worker image has a reserved methodology directory at `/opt/methodology`.
+For every scan, the worker records the selected workflow, checklist, methodology files, version/commit when available, and used skills in scan metadata. Claude Code and slash commands are not used.
 
 To include the tested Claude-BugHunter repository in published worker images, set GitHub Actions repository variables:
 
@@ -92,20 +98,33 @@ The compose file uses published GHCR images:
 - `ghcr.io/egikov99/deu-sec-lab-api:latest`
 - `ghcr.io/egikov99/deu-sec-lab-worker:latest`
 
+Persistent volumes:
+
+- `reports-data`: report artifacts
+- `postgres-data`: database
+- `redis-data`: queue data
+- `nuclei-data`: Nuclei templates under `/home/worker/.local/share/nuclei`
+- `nuclei-cache`: Nuclei cache under `/home/worker/.cache/nuclei`
+
 ## Environment
 
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
+INTERNAL_API_URL=http://api:8000
 REDIS_URL=redis://redis:6379/0
 DATABASE_URL=sqlite:////data/app.db
 REPORTS_ROOT=/reports
 ALLOW_PRIVATE_TARGETS=false
 NMAP_ALLOWED_PORTS=80,443,8080,8443
+NUCLEI_CONFIG_DIR=/home/worker/.config/nuclei
+NUCLEI_CACHE_DIR=/home/worker/.cache/nuclei
+NUCLEI_TEMPLATES_DIR=/home/worker/.local/share/nuclei/templates
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
 
 If `OPENAI_API_KEY` is empty, reports are still generated without AI.
+
+The browser uses same-origin `/api/*` requests. Do not set `NEXT_PUBLIC_API_URL` to `http://api:8000`; the `api` hostname is only resolvable inside Docker and is used by the Next.js server-side rewrite through `INTERNAL_API_URL`.
 
 ## GitHub Actions
 

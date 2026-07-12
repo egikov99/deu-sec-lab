@@ -21,7 +21,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+          "node -e \"fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
         ]
       interval: 30s
       timeout: 10s
@@ -46,7 +46,9 @@ services:
     volumes:
       - reports-data:/reports
     networks:
-      - internal
+      internal:
+        aliases:
+          - api
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,12 +75,17 @@ services:
       REPORTS_ROOT: ${REPORTS_ROOT:-/reports}
       ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
       NMAP_ALLOWED_PORTS: ${NMAP_ALLOWED_PORTS:-80,443,8080,8443}
+      NUCLEI_CONFIG_DIR: ${NUCLEI_CONFIG_DIR:-/home/worker/.config/nuclei}
+      NUCLEI_CACHE_DIR: ${NUCLEI_CACHE_DIR:-/home/worker/.cache/nuclei}
+      NUCLEI_TEMPLATES_DIR: ${NUCLEI_TEMPLATES_DIR:-/home/worker/.local/share/nuclei/templates}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       SECRET_KEY: ${SECRET_KEY:-change_me}
       TZ: ${TZ:-Europe/Warsaw}
     volumes:
       - reports-data:/reports
+      - nuclei-data:/home/worker/.local/share/nuclei
+      - nuclei-cache:/home/worker/.cache/nuclei
     networks:
       - internal
     depends_on:
@@ -88,6 +95,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "find \"$${NUCLEI_TEMPLATES_DIR}\" -type f \\( -name '*.yaml' -o -name '*.yml' \\) -print -quit | grep -q . && nuclei -validate -t \"$${NUCLEI_TEMPLATES_DIR}\" >/tmp/nuclei-health.log 2>&1",
+        ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
 
   postgres:
     image: postgres:16-alpine
@@ -130,6 +147,8 @@ volumes:
   reports-data:
   postgres-data:
   redis-data:
+  nuclei-data:
+  nuclei-cache:
 
 networks:
   internal:

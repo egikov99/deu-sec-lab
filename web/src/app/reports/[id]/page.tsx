@@ -40,6 +40,25 @@ export default function ReportPage() {
               <h2 className="mb-2 text-lg font-semibold text-white">Summary</h2>
               <p className="whitespace-pre-wrap text-sm text-slate-400">{report.summary}</p>
             </div>
+            {report.warnings?.length ? (
+              <div className="rounded-xl border border-amber-600/40 bg-amber-950/30 p-4 text-sm text-amber-200">
+                {report.warnings.join(' ')}
+              </div>
+            ) : null}
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <h2 className="mb-2 text-lg font-semibold text-white">Coverage</h2>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">{JSON.stringify(report.tool_status || {}, null, 2)}</pre>
+              </div>
+              <div>
+                <h2 className="mb-2 text-lg font-semibold text-white">Normalized Output</h2>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">{JSON.stringify(report.normalized_outputs || {}, null, 2)}</pre>
+              </div>
+            </div>
+            <div>
+              <h2 className="mb-2 text-lg font-semibold text-white">Methodology</h2>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">{JSON.stringify(report.scan_metadata || {}, null, 2)}</pre>
+            </div>
             <div>
               <h2 className="mb-2 text-lg font-semibold text-white">Markdown</h2>
               <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">{report.markdown}</pre>

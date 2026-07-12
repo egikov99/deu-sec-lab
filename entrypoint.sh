@@ -11,8 +11,9 @@ echo "[deu-security-lab] Results:   /results"
 if command -v nuclei >/dev/null 2>&1; then
   if [ ! -f /root/.local/share/nuclei/.templates_initialized ]; then
     echo "[deu-security-lab] Updating nuclei templates..."
-    nuclei -update || true
-    nuclei -update-templates || true
+    nuclei -update
+    nuclei -update-templates
+    nuclei -validate -t /root/.local/share/nuclei/templates
     mkdir -p /root/.local/share/nuclei
     touch /root/.local/share/nuclei/.templates_initialized
   fi

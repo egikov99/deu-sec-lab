@@ -87,6 +87,14 @@ export default function ProjectDetailPage() {
                 <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Scan type</div>
                 <div className="mt-2 font-medium">{project.scan_type}</div>
               </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Origin IP</div>
+                <div className="mt-2 font-medium">{project.origin_ip || 'Not configured'}</div>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Origin scan</div>
+                <div className="mt-2 font-medium">{project.origin_scan_confirmed ? 'Authorized' : 'Disabled'}</div>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -108,6 +116,11 @@ export default function ProjectDetailPage() {
                   <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase">{scan.status}</span>
                 </div>
                 <ProgressBar value={scan.progress || 0} />
+                {scan.warnings?.length ? (
+                  <div className="rounded-xl border border-amber-600/40 bg-amber-950/30 p-3 text-sm text-amber-200">
+                    {scan.warnings.join(' ')}
+                  </div>
+                ) : null}
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                   <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Live logs</div>
                   <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-slate-400">{scan.logs || 'Waiting for the worker…'}</pre>
@@ -127,6 +140,11 @@ export default function ProjectDetailPage() {
             {scan?.summary ? (
               <div className="space-y-4">
                 <p className="text-sm text-slate-300">{scan.summary}</p>
+                {scan.normalized_outputs?.cdn_detection ? (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">
+                    CDN detected: {String(Boolean(scan.normalized_outputs.cdn_detection.is_cdn))}; providers: {(scan.normalized_outputs.cdn_detection.providers || []).join(', ') || 'none'}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   {Object.entries(severitySummary).map(([severity, count]) => (
                     <span key={severity} className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-sm text-slate-300">{severity}: {String(count)}</span>

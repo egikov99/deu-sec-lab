@@ -13,6 +13,8 @@ export default function NewProjectPage() {
     target: '',
     description: '',
     scan_type: 'basic',
+    origin_ip: '',
+    origin_scan_confirmed: false,
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -58,6 +60,14 @@ export default function NewProjectPage() {
                 <option value="extended">Extended</option>
               </select>
             </div>
+            <div>
+              <label className="mb-2 block text-sm text-slate-300">Origin IP (optional)</label>
+              <input className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2" value={form.origin_ip} onChange={(e) => setForm({ ...form, origin_ip: e.target.value })} placeholder="93.184.216.34" />
+            </div>
+            <label className="flex items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">
+              <input type="checkbox" className="mt-1" checked={form.origin_scan_confirmed} onChange={(e) => setForm({ ...form, origin_scan_confirmed: e.target.checked })} />
+              <span>I confirm that I am authorized to scan the configured origin IP.</span>
+            </label>
             {error ? <p className="text-sm text-rose-400">{error}</p> : null}
             <Button type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create project'}</Button>
           </form>
