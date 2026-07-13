@@ -2,11 +2,11 @@
 
 Internal web panel for authorized security checks of projects you own or are allowed to test.
 
-The MVP is intentionally small:
+The platform is centered on Claude-BugHunter as the scan orchestration engine:
 
 - `web`: Next.js, TypeScript, TailwindCSS UI.
 - `api`: FastAPI REST API.
-- `worker`: Python RQ worker that runs only whitelisted security tools.
+- `worker`: Python RQ worker that runs the `ClaudeBugHunterAgentRunner` with a strict tool registry.
 - `redis`: scan queue.
 - `reports/{project_id}/{scan_id}`: generated scan artifacts.
 
@@ -21,32 +21,26 @@ No multi-tenant SaaS, billing, marketplace, RBAC, Kubernetes, host scanning, or 
 5. Watch status, progress, current step, and logs.
 6. Review summary, findings, recommendations, technical details, raw output, and report files.
 
-## Scan Pipeline
+## Claude-BugHunter Agent Engine
 
-Basic scan:
+Scans are no longer a fixed `subfinder -> httpx -> katana -> nuclei` sequence. The worker:
 
-1. Validate target.
-2. `httpx`
-3. `katana`
-4. `nuclei` with intrusive/dos/bruteforce/fuzz/headless tags excluded.
-5. Generate report.
+1. Loads `/opt/methodology/Claude-BugHunter`.
+2. Indexes `skills/*/SKILL.md`, commands, workflows, report templates, vulnerability patterns, chain templates, and validation guidance when present.
+3. Selects relevant skills for the project and scan mode.
+4. Creates a structured JSON scan plan.
+5. Lets OpenAI refine planner/analyzer/reporter JSON when `OPENAI_API_KEY` is configured.
+6. Executes only registered tool calls with Pydantic argument schemas.
+7. Saves every step, artifact, AI operational summary, validation decision, finding, and report.
 
-Extended scan:
-
-1. `subfinder` for domains.
-2. `dnsx`
-3. `httpx`
-4. `katana`
-5. `nuclei`
-6. `nmap` on allowed ports only.
-7. Generate report.
-
-`sqlmap` is not launched automatically in the MVP.
+If OpenAI is not configured, the runner still uses the indexed Claude-BugHunter methodology and a deterministic safe plan.
 
 ## Safety Controls
 
 - The UI never sends shell commands or arbitrary tool arguments.
-- Worker commands are built from a fixed whitelist: `httpx`, `katana`, `nuclei`, `subfinder`, `dnsx`, `nmap`.
+- Worker commands are built from a fixed registry: `subfinder`, `dnsx`, `httpx`, `katana`, `nuclei`, `nmap`, `ffuf`, `feroxbuster`, `http_request`, `openapi_parser`, `js_endpoint_extractor`, and `header_tls_checker`.
+- LLM output is accepted only as structured JSON. Arbitrary shell commands, `shell=True`, destructive payloads, DoS, brute force, data modification, persistence, and lateral movement are blocked.
+- Validation modes are `passive`, `safe_validation`, and `explicit_approval`; safe validation is the default.
 - Targets are normalized and validated server-side.
 - Private, local, loopback, link-local, and multicast targets are blocked unless `ALLOW_PRIVATE_TARGETS=true`.
 - Nmap results against Cloudflare/CDN infrastructure are marked as public edge exposure and are not attributed to the origin server.
@@ -61,28 +55,33 @@ Each completed scan writes files to:
 /reports/{project_id}/{scan_id}/
 ```
 
-Generated files:
+Generated files include:
 
 - `summary.md`
+- `report.md`
 - `report.html`
 - `raw.json`
 - `normalized.json`
 - `metadata.json`
+- `methodology.json`
 - `findings.json`
+- `scan-plan.json`
+- `timeline.json`
 - `logs.txt`
+- `full-scan.zip`
 - `report.pdf` when PDF generation succeeds
 
 ## Claude-BugHunter Methodology
 
-The worker image has a reserved methodology directory at `/opt/methodology`.
-For every scan, the worker records the selected workflow, checklist, methodology files, version/commit when available, and used skills in scan metadata. Claude Code and slash commands are not used.
+The worker image clones Claude-BugHunter into `/opt/methodology/Claude-BugHunter`.
+For every scan, the worker records the repository, commit SHA, selected skills, selected workflows, generated checklist, completed/skipped checklist items, agent iterations, model, token usage, tool calls, and validation decisions. Claude Code and slash commands are not used.
 
-To include the tested Claude-BugHunter repository in published worker images, set GitHub Actions repository variables:
+For production builds, pin the methodology to the SecOps-approved commit SHA or release tag:
 
-- `CLAUDE_BUGHUNTER_REPO`: repository URL
-- `CLAUDE_BUGHUNTER_REF`: branch, tag, or commit, defaults to `main`
+- `CLAUDE_BUGHUNTER_REPO`: defaults to `https://github.com/elementalsouls/Claude-BugHunter`
+- `CLAUDE_BUGHUNTER_REF`: approved commit SHA or release tag
 
-The MVP does not require Claude Code or slash commands.
+The readiness endpoint `/api/readiness` reports whether the repository exists, the resolved commit SHA, indexed methodology sections, and whether the runtime is ready.
 
 ## Portainer Deployment
 

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Download, ExternalLink, Play, ShieldCheck } from 'lucide-react';
+import { Download, ExternalLink, FileText, Play, ShieldCheck } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -16,6 +16,7 @@ export default function ProjectDetailPage() {
   const id = Number(params?.id);
   const [project, setProject] = useState<any>(null);
   const [scan, setScan] = useState<any>(null);
+  const [scans, setScans] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
   const refresh = async () => {
@@ -23,6 +24,7 @@ export default function ProjectDetailPage() {
     const data = await api.getProject(id);
     setProject(data.project);
     setScan(data.latest_scan || null);
+    setScans(data.scans || []);
   };
 
   useEffect(() => {
@@ -30,7 +32,7 @@ export default function ProjectDetailPage() {
   }, [id]);
 
   useEffect(() => {
-    if (!scan || !['queued', 'running'].includes(scan.status)) return;
+    if (!scan || !['queued', 'planning', 'running', 'validating', 'reporting', 'waiting_approval'].includes(scan.status)) return;
     const timer = setInterval(async () => {
       const updated = await api.getScan(scan.id);
       setScan(updated);
@@ -88,6 +90,14 @@ export default function ProjectDetailPage() {
                 <div className="mt-2 font-medium">{project.scan_type}</div>
               </div>
               <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Validation</div>
+                <div className="mt-2 font-medium">{project.default_scan_mode}</div>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Authorization</div>
+                <div className="mt-2 font-medium">{project.authorization_confirmed ? 'Confirmed' : 'Missing'}</div>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                 <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Origin IP</div>
                 <div className="mt-2 font-medium">{project.origin_ip || 'Not configured'}</div>
               </div>
@@ -112,10 +122,22 @@ export default function ProjectDetailPage() {
                   <div>
                     <div className="text-sm font-medium">{scan.current_step || 'Queued'}</div>
                     <div className="text-sm text-slate-400">Status: {scan.status}</div>
+                    <div className="text-xs text-slate-500">Phase: {scan.phase || 'queued'}</div>
                   </div>
                   <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase">{scan.status}</span>
                 </div>
                 <ProgressBar value={scan.progress || 0} />
+                <div className="grid gap-2 text-sm text-slate-400 sm:grid-cols-2">
+                  <div>Skill: <span className="text-slate-200">{scan.steps?.at?.(-1)?.skill || scan.selected_skills?.[0] || 'pending'}</span></div>
+                  <div>Tool: <span className="text-slate-200">{scan.steps?.at?.(-1)?.tool || 'pending'}</span></div>
+                  <div>Model: <span className="text-slate-200">{scan.model || 'not set'}</span></div>
+                  <div>Commit: <span className="text-slate-200">{scan.methodology_commit || 'pending'}</span></div>
+                </div>
+                {scan.approval_requests?.length ? (
+                  <div className="rounded-xl border border-amber-600/40 bg-amber-950/30 p-3 text-sm text-amber-100">
+                    Approval required: {scan.approval_requests[scan.approval_requests.length - 1]?.summary}
+                  </div>
+                ) : null}
                 {scan.warnings?.length ? (
                   <div className="rounded-xl border border-amber-600/40 bg-amber-950/30 p-3 text-sm text-amber-200">
                     {scan.warnings.join(' ')}
@@ -125,6 +147,10 @@ export default function ProjectDetailPage() {
                   <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Live logs</div>
                   <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-slate-400">{scan.logs || 'Waiting for the worker…'}</pre>
                 </div>
+                <Link href={`/projects/${project.id}/scans/${scan.id}`} className="flex items-center justify-between rounded-lg border border-cyan-700/50 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-200">
+                  <span>Open active scan</span>
+                  <ExternalLink className="h-4 w-4" />
+                </Link>
               </div>
             )}
           </CardContent>
@@ -211,6 +237,44 @@ export default function ProjectDetailPage() {
           </Card>
         </div>
       ) : null}
+
+      <div className="mt-6 grid gap-6 lg:grid-cols-[1fr,0.8fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Scan history</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {scans.length ? scans.map((item) => (
+                <Link key={item.id} href={`/projects/${project.id}/scans/${item.id}`} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-3 text-sm">
+                  <div>
+                    <div className="font-medium text-slate-100">Scan #{item.id} · {item.status}</div>
+                    <div className="text-slate-500">{formatDate(item.created_at)} · {item.methodology_commit || 'commit pending'} · {item.selected_skills?.length || 0} skills</div>
+                  </div>
+                  <span className="rounded-full bg-slate-800 px-3 py-1 text-xs">{item.findings?.length || 0} findings</span>
+                </Link>
+              )) : <p className="text-sm text-slate-400">No scan runs yet.</p>}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Project data</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              <Link href={`/projects/${project.id}/findings`} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-300">
+                <span>All findings</span>
+                <ShieldCheck className="h-4 w-4" />
+              </Link>
+              <Link href={`/projects/${project.id}/reports`} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-300">
+                <span>Reports and artifacts</span>
+                <FileText className="h-4 w-4" />
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </main>
   );
 }

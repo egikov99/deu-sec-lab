@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV GOBIN=/usr/local/bin
-ARG CLAUDE_BUGHUNTER_REPO=""
-ARG CLAUDE_BUGHUNTER_REF="main"
+ARG CLAUDE_BUGHUNTER_REPO="https://github.com/elementalsouls/Claude-BugHunter"
+ARG CLAUDE_BUGHUNTER_REF=""
 
 RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/projectdiscovery/katana/cmd/katana@latest && \
@@ -24,7 +24,11 @@ RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
 
 RUN mkdir -p /opt/methodology && \
     if [ -n "$CLAUDE_BUGHUNTER_REPO" ]; then \
-      git clone --depth 1 --branch "$CLAUDE_BUGHUNTER_REF" "$CLAUDE_BUGHUNTER_REPO" /opt/methodology/Claude-BugHunter; \
+      if [ -n "$CLAUDE_BUGHUNTER_REF" ]; then \
+        git clone --depth 1 --branch "$CLAUDE_BUGHUNTER_REF" "$CLAUDE_BUGHUNTER_REPO" /opt/methodology/Claude-BugHunter; \
+      else \
+        git clone --depth 1 "$CLAUDE_BUGHUNTER_REPO" /opt/methodology/Claude-BugHunter; \
+      fi; \
     fi
 
 RUN groupadd --system --gid 10001 worker && \

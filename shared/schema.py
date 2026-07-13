@@ -6,10 +6,22 @@ from shared.models import Base
 
 SCHEMA_COLUMNS = {
     "projects": {
+        "authorization_confirmed": "INTEGER DEFAULT 0",
+        "default_scan_mode": "VARCHAR(50) DEFAULT 'safe_validation'",
+        "credentials_encrypted": "JSON",
         "origin_ip": "VARCHAR(255)",
         "origin_scan_confirmed": "INTEGER DEFAULT 0",
     },
     "scans": {
+        "scan_mode": "VARCHAR(50) DEFAULT 'safe_validation'",
+        "phase": "VARCHAR(50) DEFAULT 'queued'",
+        "model": "VARCHAR(100)",
+        "methodology_commit": "VARCHAR(100)",
+        "selected_skills": "JSON",
+        "checklist": "JSON",
+        "token_usage": "JSON",
+        "estimated_cost": "VARCHAR(50)",
+        "approval_requests": "JSON",
         "warnings": "JSON",
         "tool_status": "JSON",
         "normalized_outputs": "JSON",

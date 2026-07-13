@@ -22,7 +22,12 @@ export const api = {
   createProject: (payload: unknown) => request<any>('/api/projects', { method: 'POST', body: JSON.stringify(payload) }),
   getProject: (id: number) => request<any>(`/api/projects/${id}`),
   startScan: (id: number) => request<any>(`/api/projects/${id}/scan`, { method: 'POST' }),
+  resumeScan: (id: number) => request<any>(`/api/scans/${id}/resume`, { method: 'POST' }),
+  cancelScan: (id: number) => request<any>(`/api/scans/${id}/cancel`, { method: 'POST' }),
   getScan: (id: number) => request<any>(`/api/scans/${id}`),
+  listFindings: (projectId: number) => request<any[]>(`/api/projects/${projectId}/findings`),
+  listReports: (projectId: number) => request<any[]>(`/api/projects/${projectId}/reports`),
+  readiness: () => request<any>('/api/readiness'),
   getReport: (id: number) => request<any>(`/api/reports/${id}`),
   reportDownloadUrl: (scanId: number, filename: string) => `${API_BASE}/api/reports/${scanId}/download/${filename}`,
 };

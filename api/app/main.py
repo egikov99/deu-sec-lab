@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 from datetime import datetime, timezone
@@ -11,8 +13,10 @@ from rq import Queue
 from sqlalchemy.orm import Session
 
 from shared.db import engine, SessionLocal
-from shared.models import Project, Scan
+from shared.claude_bughunter_runner import ClaudeBugHunterMethodology
+from shared.models import Finding, Project, Report, Scan, ScanStep
 from shared.schema import ensure_schema
+from shared.security_utils import encrypt_json
 from shared.target import validate_target
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -21,7 +25,7 @@ ALLOW_PRIVATE_TARGETS = os.getenv("ALLOW_PRIVATE_TARGETS", "false").lower() == "
 
 ensure_schema()
 
-SCAN_STATUSES = {"queued", "running", "completed", "completed_with_warnings", "failed", "cancelled"}
+SCAN_STATUSES = {"queued", "planning", "running", "waiting_approval", "validating", "reporting", "completed", "completed_with_warnings", "failed", "cancelled", "interrupted"}
 
 app = FastAPI(title="DEU Security API")
 app.add_middleware(
@@ -38,6 +42,9 @@ class ProjectCreate(BaseModel):
     target: str = Field(min_length=1)
     description: str = ""
     scan_type: str = Field(default="basic", pattern="^(basic|extended)$")
+    default_scan_mode: str = Field(default="safe_validation", pattern="^(passive|safe_validation|explicit_approval)$")
+    authorization_confirmed: bool = False
+    credentials: Optional[dict] = None
     origin_ip: Optional[str] = None
     origin_scan_confirmed: bool = False
 
@@ -81,13 +88,30 @@ def report_files(report_dir: str | None) -> list[str]:
     if not report_dir:
         return []
     root = os.path.join(REPORTS_ROOT, report_dir)
-    allowed = {"summary.md", "report.html", "raw.json", "normalized.json", "metadata.json", "findings.json", "logs.txt", "report.pdf"}
+    allowed = {"summary.md", "report.md", "report.html", "raw.json", "normalized.json", "metadata.json", "methodology.json", "findings.json", "scan-plan.json", "timeline.json", "logs.txt", "report.pdf", "full-scan.zip"}
     files = [name for name in allowed if os.path.exists(os.path.join(root, name))]
     files.extend(sorted(name for name in os.listdir(root) if name.endswith((".log", ".out"))))
     return sorted(files)
 
 
 def scan_payload(scan: Scan) -> dict:
+    steps = [
+        {
+            "id": step.id,
+            "sequence": step.sequence,
+            "phase": step.phase,
+            "skill": step.skill,
+            "tool": step.tool,
+            "input_summary": step.input_summary,
+            "status": step.status,
+            "started_at": step.started_at.isoformat() if step.started_at else None,
+            "finished_at": step.finished_at.isoformat() if step.finished_at else None,
+            "ai_analysis": step.ai_analysis or {},
+            "next_action": step.next_action or {},
+            "error": step.error,
+        }
+        for step in sorted(scan.steps or [], key=lambda item: item.sequence)
+    ]
     return {
         "id": scan.id,
         "project_id": scan.project_id,
@@ -95,6 +119,15 @@ def scan_payload(scan: Scan) -> dict:
         "current_step": scan.current_step,
         "progress": scan.progress,
         "scan_type": scan.scan_type,
+        "scan_mode": scan.scan_mode,
+        "phase": scan.phase,
+        "model": scan.model,
+        "methodology_commit": scan.methodology_commit,
+        "selected_skills": scan.selected_skills or [],
+        "checklist": scan.checklist or {},
+        "token_usage": scan.token_usage or {},
+        "estimated_cost": scan.estimated_cost,
+        "approval_requests": scan.approval_requests or [],
         "target": scan.target,
         "logs": scan.logs,
         "summary": scan.summary,
@@ -105,6 +138,7 @@ def scan_payload(scan: Scan) -> dict:
         "scan_metadata": scan.scan_metadata or {},
         "report_dir": scan.report_dir,
         "files": report_files(scan.report_dir),
+        "steps": steps,
         "created_at": scan.created_at.isoformat(),
         "started_at": scan.started_at.isoformat() if scan.started_at else None,
         "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
@@ -113,7 +147,12 @@ def scan_payload(scan: Scan) -> dict:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "claude_bughunter": ClaudeBugHunterMethodology().readiness()}
+
+
+@app.get("/api/readiness")
+def readiness():
+    return ClaudeBugHunterMethodology().readiness()
 
 
 @app.get("/api/projects")
@@ -126,6 +165,8 @@ def list_projects(db: Session = Depends(get_db)):
             "target": project.target,
             "description": project.description,
             "scan_type": project.scan_type,
+            "default_scan_mode": project.default_scan_mode,
+            "authorization_confirmed": bool(project.authorization_confirmed),
             "origin_ip": project.origin_ip,
             "origin_scan_confirmed": bool(project.origin_scan_confirmed),
             "created_at": project.created_at.isoformat(),
@@ -152,6 +193,9 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
         target=target.url,
         description=payload.description,
         scan_type=payload.scan_type,
+        default_scan_mode=payload.default_scan_mode,
+        authorization_confirmed=payload.authorization_confirmed,
+        credentials_encrypted=encrypt_json(payload.credentials),
         origin_ip=origin_ip,
         origin_scan_confirmed=payload.origin_scan_confirmed,
     )
@@ -164,6 +208,8 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
         "target": project.target,
         "description": project.description,
         "scan_type": project.scan_type,
+        "default_scan_mode": project.default_scan_mode,
+        "authorization_confirmed": bool(project.authorization_confirmed),
         "origin_ip": project.origin_ip,
         "origin_scan_confirmed": bool(project.origin_scan_confirmed),
     }
@@ -182,6 +228,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
             "target": project.target,
             "description": project.description,
             "scan_type": project.scan_type,
+            "default_scan_mode": project.default_scan_mode,
+            "authorization_confirmed": bool(project.authorization_confirmed),
             "origin_ip": project.origin_ip,
             "origin_scan_confirmed": bool(project.origin_scan_confirmed),
             "created_at": project.created_at.isoformat(),
@@ -197,7 +245,18 @@ def start_scan(project_id: int, db: Session = Depends(get_db)):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    scan = Scan(project_id=project.id, target=project.target, scan_type=project.scan_type, status="queued", current_step="Queued")
+    if not bool(project.authorization_confirmed):
+        raise HTTPException(status_code=400, detail="Authorization confirmation is required before starting a scan")
+
+    scan = Scan(
+        project_id=project.id,
+        target=project.target,
+        scan_type=project.scan_type,
+        scan_mode=project.default_scan_mode,
+        status="queued",
+        phase="queued",
+        current_step="Queued",
+    )
     db.add(scan)
     db.commit()
     db.refresh(scan)
@@ -205,6 +264,35 @@ def start_scan(project_id: int, db: Session = Depends(get_db)):
     queue = get_queue()
     queue.enqueue("shared.scan_job.run_scan_task", scan.id, job_timeout=1800)
     return {"scan": {"id": scan.id, "status": scan.status, "current_step": scan.current_step, "progress": scan.progress, "scan_type": scan.scan_type}} 
+
+
+@app.post("/api/scans/{scan_id}/resume", status_code=202)
+def resume_scan(scan_id: int, db: Session = Depends(get_db)):
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.status not in {"interrupted", "failed", "waiting_approval"}:
+        raise HTTPException(status_code=400, detail="Only interrupted, failed, or waiting approval scans can be resumed")
+    scan.status = "queued"
+    scan.phase = "queued"
+    scan.current_step = "Queued for resume"
+    scan.finished_at = None
+    db.commit()
+    get_queue().enqueue("shared.scan_job.run_scan_task", scan.id, job_timeout=1800)
+    return {"ok": True}
+
+
+@app.post("/api/scans/{scan_id}/cancel")
+def cancel_scan(scan_id: int, db: Session = Depends(get_db)):
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan.status = "cancelled"
+    scan.phase = "cancelled"
+    scan.current_step = "Cancelled"
+    scan.finished_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/scans/{scan_id}")
@@ -230,7 +318,7 @@ def update_scan_status(scan_id: int, payload: ScanStatusUpdate, db: Session = De
         scan.logs = (scan.logs or "") + f"[{datetime.now(timezone.utc).isoformat()}] {payload.message}\n"
     if payload.status == "running" and not scan.started_at:
         scan.started_at = datetime.now(timezone.utc)
-    if payload.status in {"completed", "completed_with_warnings", "failed", "cancelled"}:
+    if payload.status in {"completed", "completed_with_warnings", "failed", "cancelled", "interrupted"}:
         scan.finished_at = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}
@@ -259,6 +347,50 @@ def complete_scan(scan_id: int, payload: ScanCompletePayload, db: Session = Depe
     scan.finished_at = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/findings")
+def project_findings(project_id: int, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    findings = db.query(Finding).filter(Finding.project_id == project_id).order_by(Finding.last_seen_at.desc()).all()
+    return [
+        {
+            "id": item.id,
+            "scan_id": item.scan_id,
+            "fingerprint": item.fingerprint,
+            "title": item.title,
+            "severity": item.severity,
+            "confidence": item.confidence,
+            "category": item.category,
+            "endpoint": item.endpoint,
+            "parameter": item.parameter,
+            "validation_status": item.validation_status,
+            "status": item.status,
+            "first_seen_at": item.first_seen_at.isoformat(),
+            "last_seen_at": item.last_seen_at.isoformat(),
+        }
+        for item in findings
+    ]
+
+
+@app.get("/api/projects/{project_id}/reports")
+def project_reports(project_id: int, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    scans = db.query(Scan).filter(Scan.project_id == project_id).order_by(Scan.created_at.desc()).all()
+    return [
+        {
+            "scan_id": scan.id,
+            "status": scan.status,
+            "created_at": scan.created_at.isoformat(),
+            "methodology_commit": scan.methodology_commit,
+            "files": report_files(scan.report_dir),
+        }
+        for scan in scans
+    ]
 
 
 @app.post("/api/scans/{scan_id}/fail")
