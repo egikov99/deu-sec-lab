@@ -84,6 +84,10 @@ class ScanStep(Base):
     ai_analysis: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     next_action: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    stderr_summary: Mapped[Optional[str]] = mapped_column(Text, default="")
+    stdout_summary: Mapped[Optional[str]] = mapped_column(Text, default="")
+    actual_input_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     scan: Mapped[Scan] = relationship(back_populates="steps")
 

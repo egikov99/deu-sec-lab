@@ -25,7 +25,7 @@ ALLOW_PRIVATE_TARGETS = os.getenv("ALLOW_PRIVATE_TARGETS", "false").lower() == "
 
 ensure_schema()
 
-SCAN_STATUSES = {"queued", "planning", "running", "waiting_approval", "validating", "reporting", "completed", "completed_with_warnings", "failed", "cancelled", "interrupted"}
+SCAN_STATUSES = {"queued", "planning", "running", "waiting_approval", "validating", "reporting", "completed", "completed_with_warnings", "failed", "blocked", "cancelled", "interrupted"}
 
 app = FastAPI(title="DEU Security API")
 app.add_middleware(
@@ -42,7 +42,7 @@ class ProjectCreate(BaseModel):
     target: str = Field(min_length=1)
     description: str = ""
     scan_type: str = Field(default="basic", pattern="^(basic|extended)$")
-    default_scan_mode: str = Field(default="safe_validation", pattern="^(passive|safe_validation|explicit_approval)$")
+    default_scan_mode: str = Field(default="safe_validation", pattern="^(passive|safe_validation|explicit_approval|fallback)$")
     authorization_confirmed: bool = False
     credentials: Optional[dict] = None
     origin_ip: Optional[str] = None
@@ -109,6 +109,10 @@ def scan_payload(scan: Scan) -> dict:
             "ai_analysis": step.ai_analysis or {},
             "next_action": step.next_action or {},
             "error": step.error,
+            "stderr_summary": step.stderr_summary,
+            "stdout_summary": step.stdout_summary,
+            "actual_input_count": step.actual_input_count,
+            "failure_category": step.failure_category,
         }
         for step in sorted(scan.steps or [], key=lambda item: item.sequence)
     ]
@@ -318,7 +322,7 @@ def update_scan_status(scan_id: int, payload: ScanStatusUpdate, db: Session = De
         scan.logs = (scan.logs or "") + f"[{datetime.now(timezone.utc).isoformat()}] {payload.message}\n"
     if payload.status == "running" and not scan.started_at:
         scan.started_at = datetime.now(timezone.utc)
-    if payload.status in {"completed", "completed_with_warnings", "failed", "cancelled", "interrupted"}:
+    if payload.status in {"completed", "completed_with_warnings", "failed", "blocked", "cancelled", "interrupted"}:
         scan.finished_at = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}
@@ -438,7 +442,7 @@ def get_report(scan_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/reports/{scan_id}/download/{filename}")
 def download_report(scan_id: int, filename: str, db: Session = Depends(get_db)):
-    if "/" in filename or "\\" in filename or not filename.endswith((".md", ".html", ".json", ".txt", ".pdf", ".log", ".out")):
+    if "/" in filename or "\\" in filename or not filename.endswith((".md", ".html", ".json", ".txt", ".pdf", ".zip", ".log", ".out")):
         raise HTTPException(status_code=400, detail="Unsupported report file")
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:

@@ -27,6 +27,12 @@ SCHEMA_COLUMNS = {
         "normalized_outputs": "JSON",
         "scan_metadata": "JSON",
     },
+    "scan_steps": {
+        "stderr_summary": "TEXT",
+        "stdout_summary": "TEXT",
+        "actual_input_count": "INTEGER DEFAULT 0",
+        "failure_category": "VARCHAR(50)",
+    },
 }
 
 

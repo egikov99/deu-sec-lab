@@ -17,10 +17,10 @@ from shared.models import Artifact, Finding, Project, Report, Scan, ScanStep
 from shared.pipeline_utils import administrative_exposures, classify_nmap_target, detect_cdn, final_status, normalize_katana_output, strip_ansi
 from shared.security_utils import redact_secrets
 from shared.target import ValidatedTarget, validate_target
-from shared.tool_registry import ToolRegistry, normalize_finding_fingerprint
+from shared.tool_registry import ToolError, ToolRegistry, normalize_base_url, normalize_finding_fingerprint, normalize_host, unique_http_targets, unique_valid_hosts
 
 REPORTS_ROOT = os.getenv("REPORTS_ROOT", "/reports")
-DEFAULT_METHODOLOGY_ROOT = os.getenv("CLAUDE_BUGHUNTER_PATH", "/opt/methodology/Claude-BugHunter")
+DEFAULT_METHODOLOGY_ROOT = os.getenv("CLAUDE_BUGHUNTER_ROOT", os.getenv("CLAUDE_BUGHUNTER_PATH", "/opt/methodology/Claude-BugHunter"))
 DEFAULT_REPO = "https://github.com/elementalsouls/Claude-BugHunter"
 SAFE_VALIDATION_MODES = {"passive", "safe_validation", "explicit_approval"}
 
@@ -47,6 +47,7 @@ class ClaudeBugHunterMethodology:
         exists = self.root.is_dir()
         commit = ""
         ref_type = "missing"
+        manifest = self._manifest()
         if exists:
             commit = self._git(["rev-parse", "HEAD"])
             tag = self._git(["describe", "--tags", "--exact-match", "HEAD"])
@@ -67,7 +68,8 @@ class ClaudeBugHunterMethodology:
             "exists": exists,
             "commit_sha": commit,
             "ref_type": ref_type,
-            "pinned": bool(commit) and ref_type in {"commit", "tag"},
+            "manifest": manifest,
+            "pinned": bool(commit) and (bool(os.getenv("CLAUDE_BUGHUNTER_REF")) or ref_type == "tag" or bool(manifest.get("commit_sha"))),
             "required_sections": required,
             "ready": exists and bool(commit) and bool(files),
         }
@@ -77,6 +79,17 @@ class ClaudeBugHunterMethodology:
             return subprocess.run(["git", "-C", str(self.root), *args], check=False, capture_output=True, text=True).stdout.strip()
         except OSError:
             return ""
+
+    def _manifest(self) -> dict[str, Any]:
+        if not self.root.is_dir():
+            return {"exists": False}
+        path = self.root / "manifest.json"
+        if not path.exists():
+            return {"exists": False, "path": str(path)}
+        try:
+            return {"exists": True, "path": str(path), **json.loads(path.read_text(encoding="utf-8"))}
+        except Exception as exc:
+            return {"exists": True, "path": str(path), "error": str(exc)}
 
     def index_files(self) -> list[dict[str, Any]]:
         if not self.root.is_dir():
@@ -170,13 +183,24 @@ class ClaudeBugHunterAgentRunner:
         readiness = self.methodology.readiness()
         indexed = self.methodology.index_files()
         selected_skills = self.methodology.select_skills(self.scan.scan_type, target, indexed)
+        self.scan.methodology_commit = readiness.get("commit_sha") or "missing"
+        self.scan.scan_metadata = {
+            "methodology_name": "Claude-BugHunter" if self.scan.scan_mode != "fallback" else "Fallback safe scan",
+            "methodology_repository": DEFAULT_REPO,
+            "methodology_commit": readiness.get("commit_sha"),
+            "methodology_readiness": readiness,
+        }
+        if not readiness.get("ready") and self.scan.scan_mode != "fallback":
+            self._block_unavailable(readiness)
+            return
+
         prior_context = self._prior_context()
         plan = self._planner(target, project, readiness, indexed, selected_skills, prior_context)
-        self.scan.methodology_commit = readiness.get("commit_sha") or "missing"
         self.scan.selected_skills = [item["path"] for item in selected_skills]
         self.scan.checklist = {"generated": plan.get("ordered_steps", []), "completed": [], "skipped": []}
+        self.scan.normalized_outputs = {"cdn_detection": detect_cdn(target.host)}
         self.scan.scan_metadata = {
-            "methodology_name": "Claude-BugHunter",
+            **(self.scan.scan_metadata or {}),
             "methodology_repository": DEFAULT_REPO,
             "methodology_commit": readiness.get("commit_sha"),
             "methodology_readiness": readiness,
@@ -194,6 +218,13 @@ class ClaudeBugHunterAgentRunner:
 
         raw_outputs: dict[str, Any] = {}
         findings: list[dict[str, Any]] = []
+        state: dict[str, Any] = {
+            "target_url": normalize_base_url(target.url),
+            "target_host": target.host,
+            "discovered_hosts": [],
+            "resolved_hosts": [],
+            "reachable_targets": [],
+        }
         start = time.time()
         completed = []
 
@@ -203,6 +234,11 @@ class ClaudeBugHunterAgentRunner:
                 break
             if self._cancelled_or_interrupted():
                 return
+
+            step = self._prepare_dependency_step(step, state, project, target)
+            if step.get("skip_before_execution"):
+                self._record_synthetic_step(iteration, step, "skipped", step.get("skip_reason", "dependency not satisfied"), step.get("failure_category", "empty_input"))
+                continue
 
             tool = step.get("tool")
             if not tool:
@@ -227,24 +263,41 @@ class ClaudeBugHunterAgentRunner:
             self.session.commit()
 
             scan_step = self._create_step(iteration, step)
-            result = self.registry.execute(tool, step.get("args") or {}, target, self.report_dir)
+            args = step.get("args") or step.get("arguments") or {}
+            try:
+                self.registry.validate_call(tool, args)
+            except ToolError as exc:
+                repaired_args = self._repair_step_args(step, state, project, target)
+                try:
+                    self.registry.validate_call(tool, repaired_args)
+                    args = repaired_args
+                    step["args"] = repaired_args
+                except ToolError as second_exc:
+                    result = self._invalid_tool_result(tool, args, second_exc)
+                    self._finish_step(scan_step, result, {"operational_summary": f"{tool} skipped before execution: {second_exc}", "observations": [str(second_exc)], "candidate_findings": []})
+                    self.scan.warnings = sorted(set((self.scan.warnings or []) + [f"{tool} invalid arguments: {second_exc}"]))
+                    raw_outputs[f"{iteration:02d}_{tool}"] = result
+                    append_log(self.scan, f"{tool} invalid arguments: {second_exc}")
+                    self.session.commit()
+                    continue
+            try:
+                result = self.registry.execute(tool, args, target, self.report_dir)
+            except ToolError as exc:
+                result = self._invalid_tool_result(tool, args, exc)
             artifact_paths = self._write_tool_artifacts(iteration, tool, result)
             result["artifacts"] = artifact_paths
             analysis = self._analyzer(target, step, result)
-            scan_step.status = "completed" if result.get("status") in {"completed", "skipped"} else "failed"
-            scan_step.finished_at = utc_now()
-            scan_step.stdout_artifact = artifact_paths.get("stdout")
-            scan_step.stderr_artifact = artifact_paths.get("stderr")
-            scan_step.structured_result = redact_secrets(result)
-            scan_step.ai_analysis = analysis
-            scan_step.next_action = analysis.get("next_recommended_action") or {}
+            self._finish_step(scan_step, result, analysis, artifact_paths)
             self.scan.tool_status = {**(self.scan.tool_status or {}), tool: {"status": result.get("status"), "returncode": result.get("returncode")}}
             self.scan.normalized_outputs = self._normalize_outputs(tool, result)
+            self._update_dependency_state(tool, result, state)
             completed.append(step.get("id") or step.get("name"))
             self.scan.checklist = {**(self.scan.checklist or {}), "completed": completed}
             raw_outputs[f"{iteration:02d}_{tool}"] = result
             findings.extend(self._findings_from_result(tool, result, analysis))
             append_log(self.scan, analysis.get("operational_summary") or f"{tool} completed with status {result.get('status')}")
+            if result.get("failure_category"):
+                self.scan.warnings = sorted(set((self.scan.warnings or []) + [f"{tool}: {result.get('failure_category')}"]))
             self._record_iteration(iteration, step, result, analysis)
             self.session.commit()
 
@@ -268,19 +321,44 @@ class ClaudeBugHunterAgentRunner:
         append_log(self.scan, "Scan finished")
         self.session.commit()
 
+    def _block_unavailable(self, readiness: dict[str, Any]) -> None:
+        message = "Claude-BugHunter methodology is not available in the worker image."
+        root_cause = {
+            "root": readiness.get("root"),
+            "exists": readiness.get("exists"),
+            "commit_sha": readiness.get("commit_sha"),
+            "manifest": readiness.get("manifest"),
+            "required_sections": readiness.get("required_sections"),
+            "hint": "Check CLAUDE_BUGHUNTER_ROOT, pinned CLAUDE_BUGHUNTER_REF, worker build args, and that Portainer is running the new worker image.",
+        }
+        self.scan.status = "blocked"
+        self.scan.phase = "blocked"
+        self.scan.current_step = message
+        self.scan.progress = 100
+        self.scan.finished_at = utc_now()
+        self.scan.warnings = sorted(set((self.scan.warnings or []) + [message, f"Root cause: {json.dumps(root_cause, ensure_ascii=False)}"]))
+        self.scan.summary = f"{message} commit=missing; root={readiness.get('root')}"
+        metadata = dict(self.scan.scan_metadata or {})
+        metadata["methodology_blocker"] = root_cause
+        self.scan.scan_metadata = metadata
+        append_log(self.scan, f"Claude-BugHunter readiness: not ready; commit={readiness.get('commit_sha') or 'missing'}")
+        append_log(self.scan, message)
+        self._write_blocked_reports(root_cause)
+        self.session.commit()
+
     def _planner(self, target: ValidatedTarget, project: Project, readiness: dict[str, Any], indexed: list[dict[str, Any]], selected_skills: list[dict[str, Any]], prior_context: dict[str, Any]) -> dict[str, Any]:
         base_steps = [
-            {"id": "headers", "name": "Check headers and TLS-facing metadata", "phase": "recon", "skill": self._skill_name(selected_skills, "header"), "tool": "header_tls_checker", "args": {"url": target.url}, "validation_level": "passive"},
-            {"id": "httpx", "name": "Probe HTTP service", "phase": "recon", "skill": self._skill_name(selected_skills, "recon"), "tool": "httpx", "args": {"url": target.url}, "validation_level": "passive"},
-            {"id": "katana", "name": "Crawl target routes", "phase": "coverage", "skill": self._skill_name(selected_skills, "crawl"), "tool": "katana", "args": {"url": target.url}, "validation_level": "passive"},
-            {"id": "nuclei", "name": "Run safe nuclei checks", "phase": "detection", "skill": self._skill_name(selected_skills, "vulnerability"), "tool": "nuclei", "args": {"url": target.url}, "validation_level": "safe_validation"},
+            {"id": "headers", "name": "Check headers and TLS-facing metadata", "phase": "recon", "skill": self._skill_name(selected_skills, "header"), "tool": "header_tls_checker", "args": {"url": normalize_base_url(target.url)}, "input_dependencies": ["target_url"], "skip_condition": None, "expected_output": "headers", "validation_policy": "passive", "validation_level": "passive"},
+            {"id": "httpx", "name": "Probe HTTP service", "phase": "recon", "skill": self._skill_name(selected_skills, "recon"), "tool": "httpx", "args": {"targets": [normalize_base_url(target.url)], "follow_redirects": True, "status_code": True, "title": True, "tech_detect": True, "timeout": 10, "retries": 1}, "input_dependencies": ["discovered_hosts", "target_url"], "skip_condition": None, "expected_output": "reachable_targets", "validation_policy": "passive", "validation_level": "passive"},
+            {"id": "katana", "name": "Crawl target routes", "phase": "coverage", "skill": self._skill_name(selected_skills, "crawl"), "tool": "katana", "args": {"url": normalize_base_url(target.url)}, "input_dependencies": ["reachable_targets"], "skip_condition": "no reachable targets", "expected_output": "routes", "validation_policy": "passive", "validation_level": "passive"},
+            {"id": "nuclei", "name": "Run safe nuclei checks", "phase": "detection", "skill": self._skill_name(selected_skills, "vulnerability"), "tool": "nuclei", "args": {"url": normalize_base_url(target.url)}, "input_dependencies": ["reachable_targets"], "skip_condition": "no reachable targets", "expected_output": "findings", "validation_policy": "safe_validation", "validation_level": "safe_validation"},
         ]
         if self.scan.scan_type == "extended" and target.is_domain:
-            base_steps.insert(0, {"id": "subfinder", "name": "Discover authorized subdomains", "phase": "recon", "skill": self._skill_name(selected_skills, "subdomain"), "tool": "subfinder", "args": {"domain": target.host}, "validation_level": "passive"})
-            base_steps.insert(1, {"id": "dnsx", "name": "Resolve discovered hosts", "phase": "recon", "skill": self._skill_name(selected_skills, "dns"), "tool": "dnsx", "args": {"domain": target.host}, "validation_level": "passive"})
+            base_steps.insert(0, {"id": "subfinder", "name": "Discover authorized subdomains", "phase": "recon", "skill": self._skill_name(selected_skills, "subdomain"), "tool": "subfinder", "args": {"domain": target.host}, "input_dependencies": [], "skip_condition": None, "expected_output": "discovered_hosts", "validation_policy": "passive", "validation_level": "passive"})
+            base_steps.insert(1, {"id": "dnsx", "name": "Resolve discovered hosts", "phase": "recon", "skill": self._skill_name(selected_skills, "dns"), "tool": "dnsx", "args": {"hosts": []}, "input_dependencies": ["discovered_hosts"], "skip_condition": "discovered_hosts empty", "expected_output": "resolved_hosts", "validation_policy": "passive", "validation_level": "passive"})
         if self.scan.scan_type == "extended":
             project_origin = project.origin_ip if project.origin_scan_confirmed else target.host
-            base_steps.append({"id": "nmap", "name": "Check allowlisted ports", "phase": "exposure", "skill": self._skill_name(selected_skills, "infrastructure"), "tool": "nmap", "args": {"host": project_origin, "ports": os.getenv("NMAP_ALLOWED_PORTS", "80,443,8080,8443")}, "validation_level": "safe_validation"})
+            base_steps.append({"id": "nmap", "name": "Check allowlisted ports", "phase": "exposure", "skill": self._skill_name(selected_skills, "infrastructure"), "tool": "nmap", "args": {"host": project_origin, "ports": os.getenv("NMAP_ALLOWED_PORTS", "80,443,8080,8443"), "scan_type": "connect", "timeout": 60}, "input_dependencies": ["target_host"], "skip_condition": "CDN detected and origin IP not configured", "expected_output": "port_exposure", "validation_policy": "safe_validation", "validation_level": "safe_validation"})
         fallback_plan = {
             "objectives": ["Map authorized attack surface", "Run Claude-BugHunter selected safe checks", "Validate findings only with non-destructive evidence", "Generate reports and artifacts"],
             "attack_surface": {"target": target.url, "host": target.host, "scan_type": self.scan.scan_type, "prior_open_findings": prior_context.get("open_findings", [])},
@@ -400,6 +478,139 @@ class ClaudeBugHunterAgentRunner:
         self.session.add(scan_step)
         self.session.commit()
         return scan_step
+
+    def _prepare_dependency_step(self, step: dict[str, Any], state: dict[str, Any], project: Project, target: ValidatedTarget) -> dict[str, Any]:
+        step = dict(step)
+        tool = step.get("tool")
+        args = dict(step.get("args") or step.get("arguments") or {})
+        if tool == "dnsx":
+            hosts = unique_valid_hosts(state.get("discovered_hosts") or [])
+            if not hosts:
+                step.update({"skip_before_execution": True, "skip_reason": "No discovered hosts to resolve", "failure_category": "empty_input", "args": {"hosts": []}})
+                return step
+            args["hosts"] = hosts
+        elif tool == "httpx":
+            candidates = [*state.get("discovered_hosts", []), state.get("target_url") or target.url, state.get("target_host") or target.host]
+            args["targets"] = unique_http_targets(candidates, target.url)
+            args.setdefault("follow_redirects", True)
+            args.setdefault("status_code", True)
+            args.setdefault("title", True)
+            args.setdefault("tech_detect", True)
+            args.setdefault("timeout", 10)
+            args.setdefault("retries", 1)
+        elif tool in {"katana", "nuclei"}:
+            reachable = state.get("reachable_targets") or []
+            if reachable:
+                args["url"] = reachable[0]
+            elif step.get("id") in {"katana", "nuclei"} and self.scan.scan_mode != "fallback":
+                step.update({"skip_before_execution": True, "skip_reason": "No reachable HTTP targets from httpx", "failure_category": "empty_input", "args": args})
+                return step
+            else:
+                args["url"] = state.get("target_url") or normalize_base_url(target.url)
+        elif tool == "nmap":
+            cdn = (self.scan.normalized_outputs or {}).get("cdn_detection") or detect_cdn(target.host)
+            if cdn.get("is_cdn") and not (project.origin_ip and project.origin_scan_confirmed):
+                step.update({"skip_before_execution": True, "skip_reason": "CDN detected and origin IP is not configured.", "failure_category": "policy_blocked", "args": args})
+                return step
+            host = project.origin_ip if project.origin_ip and project.origin_scan_confirmed else normalize_host(args.get("host") or target.host)
+            args["host"] = host
+            args.setdefault("ports", os.getenv("NMAP_ALLOWED_PORTS", "80,443,8080,8443"))
+            args.setdefault("scan_type", "connect")
+            args.setdefault("timeout", 60)
+        step["args"] = args
+        return step
+
+    def _record_synthetic_step(self, sequence: int, step: dict[str, Any], status: str, reason: str, failure_category: str) -> None:
+        scan_step = ScanStep(
+            scan_id=self.scan.id,
+            sequence=sequence,
+            phase=step.get("phase", "skipped"),
+            skill=step.get("skill"),
+            tool=step.get("tool"),
+            input_summary=json.dumps(redact_secrets(step.get("args") or {}), ensure_ascii=False),
+            status=status,
+            started_at=utc_now(),
+            finished_at=utc_now(),
+            structured_result={"status": status, "reason": reason, "failure_category": failure_category},
+            ai_analysis={"operational_summary": f"{step.get('name', step.get('tool'))}: {reason}", "observations": [reason]},
+            stdout_summary="",
+            stderr_summary="",
+            actual_input_count=0,
+            failure_category=failure_category,
+            error=reason,
+        )
+        self.session.add(scan_step)
+        tool = step.get("tool")
+        if tool:
+            self.scan.tool_status = {**(self.scan.tool_status or {}), tool: {"status": status, "reason": reason, "failure_category": failure_category}}
+        self.scan.warnings = sorted(set((self.scan.warnings or []) + [f"{tool}: {reason}"]))
+        checklist = dict(self.scan.checklist or {})
+        checklist["skipped"] = (checklist.get("skipped") or []) + [{"step": step.get("id") or step.get("name"), "reason": reason}]
+        self.scan.checklist = checklist
+        append_log(self.scan, f"{tool} skipped: {reason}")
+        self.session.commit()
+
+    def _repair_step_args(self, step: dict[str, Any], state: dict[str, Any], project: Project, target: ValidatedTarget) -> dict[str, Any]:
+        tool = step.get("tool")
+        if tool == "httpx":
+            return {"targets": unique_http_targets([*state.get("discovered_hosts", []), target.url], target.url), "follow_redirects": True, "status_code": True, "title": True, "tech_detect": True, "timeout": 10, "retries": 1}
+        if tool == "dnsx":
+            return {"hosts": unique_valid_hosts(state.get("discovered_hosts") or []), "timeout": 10, "retries": 1}
+        if tool == "nmap":
+            return {"host": normalize_host(project.origin_ip if project.origin_ip and project.origin_scan_confirmed else target.host), "ports": os.getenv("NMAP_ALLOWED_PORTS", "80,443,8080,8443"), "scan_type": "connect", "timeout": 60}
+        if tool in {"katana", "nuclei", "header_tls_checker"}:
+            return {"url": state.get("target_url") or normalize_base_url(target.url)}
+        return step.get("args") or {}
+
+    def _invalid_tool_result(self, tool: str, args: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        return {
+            "tool": tool,
+            "status": "skipped",
+            "failure_category": "invalid_arguments",
+            "reason": str(exc),
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "stdout_summary": "",
+            "stderr_summary": str(exc)[:1200],
+            "duration_seconds": 0,
+            "timeout": None,
+            "retry_count": 0,
+            "actual_input_count": 0,
+            "normalized_arguments": redact_secrets(args),
+        }
+
+    def _finish_step(self, scan_step: ScanStep, result: dict[str, Any], analysis: dict[str, Any], artifact_paths: dict[str, str] | None = None) -> None:
+        artifact_paths = artifact_paths or {}
+        scan_step.status = "completed" if result.get("status") == "completed" else "skipped" if result.get("status") == "skipped" else "failed"
+        scan_step.finished_at = utc_now()
+        scan_step.stdout_artifact = artifact_paths.get("stdout")
+        scan_step.stderr_artifact = artifact_paths.get("stderr")
+        scan_step.structured_result = redact_secrets(result)
+        scan_step.ai_analysis = analysis
+        scan_step.next_action = analysis.get("next_recommended_action") or {}
+        scan_step.stderr_summary = result.get("stderr_summary", "")
+        scan_step.stdout_summary = result.get("stdout_summary", "")
+        scan_step.actual_input_count = int(result.get("actual_input_count") or 0)
+        scan_step.failure_category = result.get("failure_category")
+        scan_step.error = result.get("reason") or result.get("stderr_summary") if scan_step.status in {"failed", "skipped"} else None
+
+    def _update_dependency_state(self, tool: str, result: dict[str, Any], state: dict[str, Any]) -> None:
+        lines = [line.strip() for line in (result.get("stdout") or "").splitlines() if line.strip()]
+        if tool == "subfinder":
+            state["discovered_hosts"] = unique_valid_hosts(lines)
+        elif tool == "dnsx":
+            hosts = []
+            for line in lines:
+                hosts.append(line.split()[0])
+            state["resolved_hosts"] = unique_valid_hosts(hosts)
+        elif tool == "httpx" and result.get("status") == "completed":
+            targets = []
+            for line in lines:
+                first = line.split()[0]
+                if first.startswith("http://") or first.startswith("https://"):
+                    targets.append(first)
+            state["reachable_targets"] = unique_http_targets(targets, state.get("target_url") or "")
 
     def _write_tool_artifacts(self, sequence: int, tool: str, result: dict[str, Any]) -> dict[str, str]:
         paths = {}
@@ -540,8 +751,14 @@ class ClaudeBugHunterAgentRunner:
             tool = step.get("tool")
             if tool and tool not in registered:
                 return False
-            if "args" in step and not isinstance(step["args"], dict):
+            args = step.get("args") or step.get("arguments") or {}
+            if args and not isinstance(args, dict):
                 return False
+            if tool:
+                try:
+                    self.registry.validate_call(tool, args)
+                except ToolError:
+                    return False
         return True
 
     def _write_reports(self, target: ValidatedTarget, plan: dict[str, Any], findings: list[dict[str, Any]], raw_outputs: dict[str, Any]) -> None:
@@ -645,6 +862,47 @@ class ClaudeBugHunterAgentRunner:
         for filename in ("report.html", "report.md", "findings.json", "scan-plan.json", "methodology.json", "timeline.json", "full-scan.zip"):
             self.session.add(Report(scan_id=self.scan.id, format=filename.rsplit(".", 1)[-1], filename=filename))
         self.session.commit()
+
+    def _write_blocked_reports(self, root_cause: dict[str, Any]) -> None:
+        os.makedirs(self.report_dir, exist_ok=True)
+        self.scan.report_dir = os.path.relpath(self.report_dir, REPORTS_ROOT)
+        summary = "\n".join(
+            [
+                "# Security scan blocked",
+                "",
+                "Claude-BugHunter methodology is not available in the worker image.",
+                "",
+                "## Root cause",
+                "",
+                "```json",
+                json.dumps(root_cause, indent=2, ensure_ascii=False),
+                "```",
+                "",
+                "This scan was not executed as a Claude-BugHunter audit.",
+            ]
+        )
+        files: dict[str, Any] = {
+            "summary.md": summary,
+            "report.md": summary,
+            "findings.json": [],
+            "scan-plan.json": {"blocked": True, "reason": "claude_bughunter_unavailable"},
+            "methodology.json": self.scan.scan_metadata or {},
+            "timeline.json": [],
+            "logs.txt": self.scan.logs or "",
+        }
+        for filename, payload in files.items():
+            path = os.path.join(self.report_dir, filename)
+            if isinstance(payload, str):
+                with open(path, "w", encoding="utf-8") as file:
+                    file.write(payload)
+            else:
+                write_json(path, payload)
+            self._record_artifact(filename, "report" if filename.endswith(".md") else "artifact")
+        with open(os.path.join(self.report_dir, "report.html"), "w", encoding="utf-8") as file:
+            file.write("<!doctype html><html><body><h1>Security scan blocked</h1><p>Claude-BugHunter methodology is not available in the worker image.</p></body></html>")
+        self._record_artifact("report.html", "report")
+        self.session.add(Report(scan_id=self.scan.id, format="html", filename="report.html"))
+        self.session.add(Report(scan_id=self.scan.id, format="md", filename="report.md"))
 
     def _prior_context(self) -> dict[str, Any]:
         previous = (
