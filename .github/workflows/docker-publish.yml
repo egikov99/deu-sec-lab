@@ -36,13 +36,41 @@ jobs:
           file: ./web/Dockerfile
           push: true
           tags: ghcr.io/egikov99/deu-sec-lab-web:latest
-      - name: Build and push Worker image
+      - name: Build Worker image for smoke test
+        id: build-worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: worker/Dockerfile
+          load: true
+          tags: deu-sec-lab-worker:${{ github.sha }}
+          build-args: |
+            CLAUDE_BUGHUNTER_COMMIT=05098fc78842ec23fb96be4d07bd9cdc128a443b
+            CLAUDE_BUGHUNTER_REPOSITORY=https://github.com/elementalsouls/Claude-BugHunter.git
+      - name: Smoke test Worker image
+        run: |
+          docker run --rm deu-sec-lab-worker:${{ github.sha }} sh -lc '
+            echo "ROOT=$CLAUDE_BUGHUNTER_ROOT"
+            test "$CLAUDE_BUGHUNTER_ROOT" = "/opt/methodology/Claude-BugHunter"
+            test -d /opt/methodology/Claude-BugHunter
+            test -f /opt/methodology/Claude-BugHunter/manifest.json
+            git -C /opt/methodology/Claude-BugHunter rev-parse HEAD
+            find /opt/methodology/Claude-BugHunter -name SKILL.md | grep -q .
+          '
+      - name: Publish Worker image
+        id: push-worker
         uses: docker/build-push-action@v6
         with:
           context: .
           file: worker/Dockerfile
           push: true
-          tags: ghcr.io/egikov99/deu-sec-lab-worker:latest
+          tags: |
+            ghcr.io/egikov99/deu-sec-lab-worker:${{ github.sha }}
+            ghcr.io/egikov99/deu-sec-lab-worker:latest
           build-args: |
-            CLAUDE_BUGHUNTER_REPO=${{ vars.CLAUDE_BUGHUNTER_REPO }}
-            CLAUDE_BUGHUNTER_REF=${{ vars.CLAUDE_BUGHUNTER_REF || 'main' }}
+            CLAUDE_BUGHUNTER_COMMIT=05098fc78842ec23fb96be4d07bd9cdc128a443b
+            CLAUDE_BUGHUNTER_REPOSITORY=https://github.com/elementalsouls/Claude-BugHunter.git
+      - name: Print Worker image reference
+        run: |
+          echo "Worker immutable tag: ghcr.io/egikov99/deu-sec-lab-worker:${{ github.sha }}"
+          echo "Worker digest: ${{ steps.push-worker.outputs.digest }}"

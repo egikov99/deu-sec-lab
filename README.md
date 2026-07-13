@@ -76,12 +76,12 @@ Generated files include:
 The worker image clones Claude-BugHunter into `/opt/methodology/Claude-BugHunter`.
 For every scan, the worker records the repository, commit SHA, selected skills, selected workflows, generated checklist, completed/skipped checklist items, agent iterations, model, token usage, tool calls, and validation decisions. Claude Code and slash commands are not used.
 
-For production builds, pin the methodology to the SecOps-approved commit SHA or release tag:
+The worker build pins the SecOps-approved methodology commit and fails if the commit is missing or cannot be checked out:
 
-- `CLAUDE_BUGHUNTER_REPO`: defaults to `https://github.com/elementalsouls/Claude-BugHunter`
-- `CLAUDE_BUGHUNTER_REF`: approved commit SHA or release tag
+- `CLAUDE_BUGHUNTER_COMMIT=05098fc78842ec23fb96be4d07bd9cdc128a443b`
+- `CLAUDE_BUGHUNTER_REPOSITORY=https://github.com/elementalsouls/Claude-BugHunter.git`
 
-The readiness endpoint `/api/readiness` reports whether the repository exists, the resolved commit SHA, indexed methodology sections, and whether the runtime is ready.
+The build writes `/opt/methodology/Claude-BugHunter/manifest.json`. The readiness endpoint `/api/readiness` reports whether the repository exists, the resolved commit SHA, manifest status, indexed methodology sections, and whether the runtime is ready.
 
 ## Portainer Deployment
 
@@ -95,7 +95,9 @@ The compose file uses published GHCR images:
 
 - `ghcr.io/egikov99/deu-sec-lab-web:latest`
 - `ghcr.io/egikov99/deu-sec-lab-api:latest`
-- `ghcr.io/egikov99/deu-sec-lab-worker:latest`
+- `ghcr.io/egikov99/deu-sec-lab-worker:${WORKER_IMAGE_TAG}`
+
+Set `WORKER_IMAGE_TAG` to the immutable GitHub SHA tag printed by the Docker publish workflow.
 
 Persistent volumes:
 
@@ -119,6 +121,7 @@ NUCLEI_CACHE_DIR=/home/worker/.cache/nuclei
 NUCLEI_TEMPLATES_DIR=/home/worker/.local/share/nuclei/templates
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
+WORKER_IMAGE_TAG=<github-sha-from-docker-publish-workflow>
 ```
 
 If `OPENAI_API_KEY` is empty, reports are still generated without AI.
@@ -127,7 +130,7 @@ The browser uses same-origin `/api/*` requests. Do not set `NEXT_PUBLIC_API_URL`
 
 ## GitHub Actions
 
-`.github/workflows/docker-publish.yml` builds and publishes the three runtime images to GHCR on pushes to `main` and manual dispatch.
+`.github/workflows/docker-publish.yml` builds and publishes the three runtime images to GHCR on pushes to `main` and manual dispatch. The worker image is built locally first, smoke-tested for `CLAUDE_BUGHUNTER_ROOT`, `manifest.json`, checked-out commit, and at least one `SKILL.md`, then published as both `ghcr.io/egikov99/deu-sec-lab-worker:${GITHUB_SHA}` and `latest`.
 
 ## Important
 

@@ -66,7 +66,7 @@ services:
       start_period: 30s
 
   worker:
-    image: ghcr.io/egikov99/deu-sec-lab-worker:latest
+    image: ghcr.io/egikov99/deu-sec-lab-worker:${WORKER_IMAGE_TAG:?Set WORKER_IMAGE_TAG to the immutable GitHub SHA tag published by GitHub Actions}
     pull_policy: always
     container_name: deu-sec-lab-worker
     environment:

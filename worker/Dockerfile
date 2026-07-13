@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV GOBIN=/usr/local/bin
-ARG CLAUDE_BUGHUNTER_REPO="https://github.com/elementalsouls/Claude-BugHunter"
-ARG CLAUDE_BUGHUNTER_REF=""
+ARG CLAUDE_BUGHUNTER_COMMIT
+ARG CLAUDE_BUGHUNTER_REPOSITORY="https://github.com/elementalsouls/Claude-BugHunter.git"
 
 RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/projectdiscovery/katana/cmd/katana@latest && \
@@ -22,14 +22,19 @@ RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 
-RUN mkdir -p /opt/methodology && \
-    if [ -n "$CLAUDE_BUGHUNTER_REPO" ]; then \
-      if [ -n "$CLAUDE_BUGHUNTER_REF" ]; then \
-        git clone --depth 1 --branch "$CLAUDE_BUGHUNTER_REF" "$CLAUDE_BUGHUNTER_REPO" /opt/methodology/Claude-BugHunter; \
-      else \
-        git clone --depth 1 "$CLAUDE_BUGHUNTER_REPO" /opt/methodology/Claude-BugHunter; \
-      fi; \
-    fi
+RUN test -n "$CLAUDE_BUGHUNTER_COMMIT" && \
+    export CLAUDE_BUGHUNTER_COMMIT CLAUDE_BUGHUNTER_REPOSITORY && \
+    mkdir -p /opt/methodology && \
+    git clone "$CLAUDE_BUGHUNTER_REPOSITORY" /opt/methodology/Claude-BugHunter && \
+    git -C /opt/methodology/Claude-BugHunter checkout "$CLAUDE_BUGHUNTER_COMMIT" && \
+    export ACTUAL_COMMIT="$(git -C /opt/methodology/Claude-BugHunter rev-parse HEAD)" && \
+    test "$ACTUAL_COMMIT" = "$CLAUDE_BUGHUNTER_COMMIT" && \
+    test -f /opt/methodology/Claude-BugHunter/README.md && \
+    export SKILL_COUNT="$(find /opt/methodology/Claude-BugHunter -name SKILL.md -type f | wc -l)" && \
+    test "$SKILL_COUNT" -gt 0 && \
+    export COMMAND_COUNT="$(find /opt/methodology/Claude-BugHunter -path '*/commands/*' -type f \( -name '*.md' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' \) | wc -l)" && \
+    export SOURCE_HASHES="$(find /opt/methodology/Claude-BugHunter -type f \( -name 'SKILL.md' -o -path '*/commands/*' -o -name '*.md' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' \) -print | sort | head -n 200 | xargs sha256sum)" && \
+    python -c 'import json, os, pathlib; root=pathlib.Path("/opt/methodology/Claude-BugHunter"); hashes={}; raw=os.environ["SOURCE_HASHES"].splitlines(); [hashes.setdefault(line.split(maxsplit=1)[1].replace(str(root)+"/",""), line.split(maxsplit=1)[0]) for line in raw if line.strip()]; json.dump({"repository": os.environ["CLAUDE_BUGHUNTER_REPOSITORY"], "requested_commit": os.environ["CLAUDE_BUGHUNTER_COMMIT"], "actual_commit": os.environ["ACTUAL_COMMIT"], "build_timestamp": os.popen("date -u +%Y-%m-%dT%H:%M:%SZ").read().strip(), "skill_count": int(os.environ["SKILL_COUNT"]), "command_count": int(os.environ["COMMAND_COUNT"]), "source_file_hashes": hashes}, open(root/"manifest.json","w"), indent=2)'
 
 RUN groupadd --system --gid 10001 worker && \
     useradd --system --uid 10001 --gid worker --home-dir /home/worker --create-home worker && \
@@ -42,6 +47,7 @@ ENV XDG_CACHE_HOME=/home/worker/.cache
 ENV NUCLEI_CONFIG_DIR=/home/worker/.config/nuclei
 ENV NUCLEI_CACHE_DIR=/home/worker/.cache/nuclei
 ENV NUCLEI_TEMPLATES_DIR=/home/worker/.local/share/nuclei/templates
+ENV CLAUDE_BUGHUNTER_ROOT=/opt/methodology/Claude-BugHunter
 
 WORKDIR /app
 COPY worker/requirements.txt ./requirements.txt
