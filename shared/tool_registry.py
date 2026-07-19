@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
 import shutil
@@ -26,6 +27,8 @@ from shared.target import ValidatedTarget
 NMAP_ALLOWED_PORTS = os.getenv("NMAP_ALLOWED_PORTS", "80,443,8080,8443")
 SAFE_NUCLEI_EXCLUDE_TAGS = "dos,intrusive,bruteforce,fuzz,headless"
 MAX_OUTPUT_CHARS = 120_000
+HTTPX_BINARY = os.getenv("HTTPX_BINARY", "/usr/local/bin/httpx")
+HTTPX_USER_AGENT = "DEU-Security-Platform/1.0"
 
 
 class ToolError(RuntimeError):
@@ -168,25 +171,29 @@ class ToolRegistry:
         result["tool"] = name
         return result
 
-    def _run(self, command: list[str], cwd: str, timeout: int, max_output: int, retry_count: int = 0) -> dict[str, Any]:
+    def _run(self, command: list[str], cwd: str, timeout: int, max_output: int, retry_count: int = 0, input_text: str | None = None) -> dict[str, Any]:
         started = time.time()
         if not shutil.which(command[0]):
             return self._result("skipped", "binary_missing", None, "", "", timeout, started, retry_count, "binary not installed")
         attempts = 0
         last: dict[str, Any] = {}
         while attempts <= retry_count:
-            process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE if input_text is not None else None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                stdout, stderr = process.communicate(timeout=timeout)
+                stdout, stderr = process.communicate(input=input_text, timeout=timeout)
             except subprocess.TimeoutExpired:
                 process.kill()
                 stdout, stderr = process.communicate()
-                return self._result("failed", "timeout", 124, stdout, f"{stderr}\nCommand timed out after {timeout} seconds", timeout, started, attempts, f"timeout after {timeout} seconds", max_output)
+                last = self._result("failed", "timeout", 124, stdout, f"{stderr}\nCommand timed out after {timeout} seconds", timeout, started, attempts, f"timeout after {timeout} seconds", max_output)
+                if attempts < retry_count:
+                    attempts += 1
+                    continue
+                return last
             stdout_clean = strip_ansi(stdout)[-max_output:]
             stderr_clean = strip_ansi(stderr)[-max_output:]
             category = failure_category(process.returncode, stdout_clean, stderr_clean)
             last = self._result("completed" if process.returncode == 0 else "failed", category, process.returncode, stdout_clean, stderr_clean, timeout, started, attempts, "", max_output)
-            if process.returncode == 0 or category != "network_error":
+            if process.returncode == 0 or category not in {"dns_temporary", "connection_reset", "timeout", "tls_transient"}:
                 return last
             attempts += 1
         return last
@@ -199,11 +206,13 @@ class ToolRegistry:
             "failure_category": category if status != "completed" else None,
             "reason": reason,
             "returncode": returncode,
+            "exit_code": returncode,
             "stdout": stdout_clean,
             "stderr": stderr_clean,
             "stdout_summary": summarize(stdout_clean),
             "stderr_summary": summarize(stderr_clean),
             "duration_seconds": round(time.time() - started, 3),
+            "duration": round(time.time() - started, 3),
             "timeout": timeout,
             "retry_count": retry_count,
         }
@@ -230,12 +239,20 @@ class ToolRegistry:
                 "command_description": prepared.get("command_description", name),
             }
         command = prepared["command"]
-        result = self._run(command, cwd, prepared.get("timeout") or definition.timeout, definition.max_output, retry_count=prepared.get("retries", 0))
+        result = self._run(command, cwd, prepared.get("timeout") or definition.timeout, definition.max_output, retry_count=prepared.get("retries", 0), input_text=prepared.get("stdin"))
         result["command_description"] = prepared["command_description"]
         result["binary_version"] = self._binary_version(command[0])
+        result["binary_path"] = shutil.which(command[0]) or command[0]
+        result["argv"] = command
         result["normalized_arguments"] = redact_secrets(prepared["normalized_arguments"])
         result["input_source"] = prepared.get("input_source", "arguments")
         result["actual_input_count"] = prepared.get("actual_input_count", 0)
+        result["input_count"] = prepared.get("actual_input_count", 0)
+        result["normalized_input_targets"] = prepared.get("normalized_arguments", {}).get("targets", [])
+        if name == "httpx":
+            parsed, warnings = parse_httpx_json_lines(result.get("stdout", ""))
+            result["parsed_output"] = parsed
+            result["parse_warnings"] = warnings
         if name == "nuclei":
             result["findings"] = parse_nuclei_findings(result.get("stdout", ""))
         return result
@@ -259,20 +276,9 @@ class ToolRegistry:
         if name == "httpx":
             targets = unique_http_targets(data.get("targets") or [], target.url)
             if not targets:
-                targets = [normalize_base_url(target.url)]
-            input_path = os.path.join(cwd, "httpx-input.txt")
-            with open(input_path, "w", encoding="utf-8") as file:
-                file.write("\n".join(targets) + "\n")
-            command = ["httpx", "-silent", "-l", input_path, "-timeout", str(data.get("timeout", 10)), "-retries", str(data.get("retries", 1))]
-            if data.get("follow_redirects"):
-                command.append("-follow-redirects")
-            if data.get("status_code"):
-                command.append("-status-code")
-            if data.get("title"):
-                command.append("-title")
-            if data.get("tech_detect"):
-                command.append("-tech-detect")
-            return {"command": command, "command_description": f"httpx -l httpx-input.txt ({len(targets)} targets)", "normalized_arguments": {**data, "targets": targets}, "actual_input_count": len(targets), "input_source": "reachable_candidates", "timeout": data.get("timeout", definition_timeout(name)), "retries": data.get("retries", 0)}
+                raise ToolError("httpx has no valid normalized targets")
+            command = [HTTPX_BINARY, "-silent", "-json", "-status-code", "-title", "-tech-detect", "-follow-redirects", "-timeout", str(data.get("timeout", 10)), "-retries", str(data.get("retries", 1))]
+            return {"command": command, "stdin": "\n".join(targets) + "\n", "command_description": f"httpx stdin ({len(targets)} targets)", "normalized_arguments": {**data, "targets": targets}, "actual_input_count": len(targets), "input_source": "reachable_candidates", "timeout": data.get("timeout", definition_timeout(name)), "retries": data.get("retries", 0)}
         if name == "katana":
             url = normalize_base_url(data.get("url") or target.url)
             return {"command": ["katana", "-silent", "-u", url, "-d", "2"], "command_description": f"katana -u {url} -d 2", "normalized_arguments": {"url": url}, "actual_input_count": 1, "input_source": "reachable_http"}
@@ -319,6 +325,30 @@ class ToolRegistry:
             return summarize(strip_ansi((process.stdout or process.stderr)[:2000]))
         except Exception as exc:
             return f"version unavailable: {exc}"
+
+    def safe_http_reachability(self, url: str, timeout: int = 10) -> dict[str, Any]:
+        normalized = normalize_http_target(url)
+        if not normalized or not normalized.startswith(("http://", "https://")):
+            return {"reachable": False, "failure_category": "invalid_arguments", "reason": "invalid fallback URL", "url": normalized}
+        headers = {"User-Agent": HTTPX_USER_AGENT, "Accept": "*/*"}
+        started = time.time()
+        attempts = []
+        for method in ("HEAD", "GET"):
+            try:
+                response = requests.request(method, normalized, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
+                attempts.append({"method": method, "status_code": response.status_code, "url": response.url})
+                response.close()
+                if method == "HEAD" and response.status_code in {405, 501}:
+                    continue
+                if 200 <= response.status_code < 500:
+                    return {"reachable": True, "url": response.url, "status_code": response.status_code, "method": method, "attempts": attempts, "duration": round(time.time() - started, 3)}
+                if method == "HEAD":
+                    break
+            except requests.RequestException as exc:
+                attempts.append({"method": method, "error": str(exc)})
+                if method == "HEAD":
+                    continue
+        return {"reachable": False, "url": normalized, "attempts": attempts, "failure_category": "network_error", "duration": round(time.time() - started, 3)}
 
     def _execute_builtin(self, name: str, args: BaseModel, definition: ToolDefinition) -> dict[str, Any]:
         data = args.model_dump()
@@ -388,13 +418,38 @@ def normalize_base_url(value: str) -> str:
     return f"{parsed.scheme}://{host}{port}"
 
 
+def normalize_http_target(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw or any(char in raw for char in " \t\r\n;|`$<>"):
+        return None
+    parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="")
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https"}:
+        return None
+    if parsed.username or parsed.password or not parsed.hostname or not valid_host(parsed.hostname):
+        return None
+    try:
+        port = f":{parsed.port}" if parsed.port else ""
+    except ValueError:
+        return None
+    hostname = parsed.hostname.lower()
+    authority = (f"[{hostname}]" if ":" in hostname else hostname) + port
+    prefix = f"{parsed.scheme.lower()}://" if parsed.scheme else ""
+    path = parsed.path or ""
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{prefix}{authority}{path}{query}"
+
+
 def valid_host(value: str) -> bool:
     host = normalize_host(value)
     if not host:
         return False
-    if IP_RE.match(host):
-        parts = host.split(".")
-        return all(0 <= int(part) <= 255 for part in parts)
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
     return bool(DOMAIN_RE.match(host))
 
 
@@ -415,11 +470,27 @@ def unique_http_targets(values: list[str], fallback_url: str) -> list[str]:
     for value in [*values, fallback_url]:
         if not value:
             continue
-        url = normalize_base_url(value)
-        if url not in seen and normalize_host(url):
+        url = normalize_http_target(value)
+        if url and url not in seen:
             seen.add(url)
             targets.append(url)
     return targets
+
+
+def parse_httpx_json_lines(stdout: str) -> tuple[list[dict[str, Any]], list[str]]:
+    parsed, warnings = [], []
+    for number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict):
+                parsed.append(item)
+            else:
+                warnings.append(f"line {number}: JSON value is not an object")
+        except json.JSONDecodeError as exc:
+            warnings.append(f"line {number}: {exc.msg}")
+    return parsed, warnings
 
 
 def summarize(value: str, limit: int = 1200) -> str:
@@ -431,9 +502,15 @@ def failure_category(returncode: int | None, stdout: str, stderr: str) -> str:
     if returncode == 0:
         return ""
     text = f"{stdout}\n{stderr}".lower()
-    if returncode == 124 or "timeout" in text or "deadline" in text:
+    if returncode == 124 or "timeout" in text or "deadline" in text or "i/o timeout" in text:
         return "timeout"
-    if any(term in text for term in ("no such host", "connection refused", "connection reset", "network is unreachable", "temporary failure", "i/o timeout")):
+    if any(term in text for term in ("temporary failure in name resolution", "server misbehaving", "dns temporary")):
+        return "dns_temporary"
+    if "connection reset" in text:
+        return "connection_reset"
+    if any(term in text for term in ("tls handshake timeout", "tls handshake failure", "remote error: tls")):
+        return "tls_transient"
+    if any(term in text for term in ("no such host", "connection refused", "network is unreachable")):
         return "network_error"
     if any(term in text for term in ("invalid", "unknown flag", "usage:", "requires", "missing")):
         return "invalid_arguments"

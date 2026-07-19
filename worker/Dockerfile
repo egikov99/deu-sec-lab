@@ -16,8 +16,7 @@ ENV GOBIN=/usr/local/bin
 ARG CLAUDE_BUGHUNTER_COMMIT
 ARG CLAUDE_BUGHUNTER_REPOSITORY="https://github.com/elementalsouls/Claude-BugHunter.git"
 
-RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
-    go install github.com/projectdiscovery/katana/cmd/katana@latest && \
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest && \
     go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && \
     go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -52,6 +51,18 @@ ENV CLAUDE_BUGHUNTER_ROOT=/opt/methodology/Claude-BugHunter
 WORKDIR /app
 COPY worker/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+# Install last: Python's transitive httpx package also owns /usr/local/bin/httpx.
+RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
+    httpx -version 2>&1 | grep -Eiq 'projectdiscovery|current version' && \
+    go version -m "$(command -v httpx)" | grep -Fq 'github.com/projectdiscovery/httpx/cmd/httpx' && \
+    httpx -h 2>&1 | grep -Eq -- '-silent' && \
+    httpx -h 2>&1 | grep -Eq -- '-json' && \
+    httpx -h 2>&1 | grep -Eq -- '-status-code' && \
+    httpx -h 2>&1 | grep -Eq -- '-title' && \
+    httpx -h 2>&1 | grep -Eq -- '-tech-detect' && \
+    httpx -h 2>&1 | grep -Eq -- '-follow-redirects' && \
+    httpx -h 2>&1 | grep -Eq -- '-timeout' && \
+    httpx -h 2>&1 | grep -Eq -- '-retries'
 COPY shared ./shared
 COPY worker/app ./app
 COPY --chmod=755 worker/entrypoint.sh /entrypoint.sh

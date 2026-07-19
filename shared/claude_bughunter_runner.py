@@ -224,6 +224,8 @@ class ClaudeBugHunterAgentRunner:
             "discovered_hosts": [],
             "resolved_hosts": [],
             "reachable_targets": [],
+            "httpx_failed": False,
+            "fallback_reachability": None,
         }
         start = time.time()
         completed = []
@@ -284,11 +286,20 @@ class ClaudeBugHunterAgentRunner:
                 result = self.registry.execute(tool, args, target, self.report_dir)
             except ToolError as exc:
                 result = self._invalid_tool_result(tool, args, exc)
+            if tool == "httpx" and result.get("status") == "failed":
+                state["httpx_failed"] = True
+                fallback = self.registry.safe_http_reachability(state["target_url"], timeout=int(args.get("timeout", 10)))
+                state["fallback_reachability"] = fallback
+                result["fallback_reachability"] = fallback
+                if fallback.get("reachable"):
+                    state["reachable_targets"] = [fallback["url"]]
+                    self.scan.warnings = sorted(set((self.scan.warnings or []) + ["httpx failed; fallback reachability successful; web scan continued"]))
+                    append_log(self.scan, "httpx failed; fallback reachability successful; scan continues")
             artifact_paths = self._write_tool_artifacts(iteration, tool, result)
             result["artifacts"] = artifact_paths
             analysis = self._analyzer(target, step, result)
             self._finish_step(scan_step, result, analysis, artifact_paths)
-            self.scan.tool_status = {**(self.scan.tool_status or {}), tool: {"status": result.get("status"), "returncode": result.get("returncode")}}
+            self.scan.tool_status = {**(self.scan.tool_status or {}), tool: {"status": result.get("status"), "returncode": result.get("returncode"), "failure_category": result.get("failure_category"), "stderr": result.get("stderr_summary", ""), "binary_path": result.get("binary_path"), "binary_version": result.get("binary_version")}}
             self.scan.normalized_outputs = self._normalize_outputs(tool, result)
             self._update_dependency_state(tool, result, state)
             completed.append(step.get("id") or step.get("name"))
@@ -606,11 +617,11 @@ class ClaudeBugHunterAgentRunner:
             state["resolved_hosts"] = unique_valid_hosts(hosts)
         elif tool == "httpx" and result.get("status") == "completed":
             targets = []
-            for line in lines:
-                first = line.split()[0]
-                if first.startswith("http://") or first.startswith("https://"):
-                    targets.append(first)
-            state["reachable_targets"] = unique_http_targets(targets, state.get("target_url") or "")
+            for item in result.get("parsed_output", []):
+                candidate = item.get("url") or item.get("input")
+                if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                    targets.append(candidate)
+            state["reachable_targets"] = unique_http_targets(targets, state.get("target_url") or "") if targets else []
 
     def _write_tool_artifacts(self, sequence: int, tool: str, result: dict[str, Any]) -> dict[str, str]:
         paths = {}

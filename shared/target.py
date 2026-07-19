@@ -42,8 +42,8 @@ def validate_target(target: str, allow_private: bool = False) -> ValidatedTarget
         raise ValueError("Only http and https targets are allowed")
     if parsed.username or parsed.password:
         raise ValueError("Credentials in target URLs are not allowed")
-    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
-        raise ValueError("Use only a URL origin, domain, or IP address")
+    if parsed.params:
+        raise ValueError("URL parameters are not supported")
     if not parsed.hostname:
         raise ValueError("Target host is required")
 
@@ -62,5 +62,7 @@ def validate_target(target: str, allow_private: bool = False) -> ValidatedTarget
         raise ValueError("Private, local, and loopback targets are disabled by default")
 
     port = f":{parsed.port}" if parsed.port else ""
-    url = f"{parsed.scheme}://{host}{port}"
+    path = parsed.path or ""
+    query = f"?{parsed.query}" if parsed.query else ""
+    url = f"{parsed.scheme}://{host}{port}{path}{query}"
     return ValidatedTarget(original=value, host=host, url=url, is_domain=is_domain, is_ip=is_ip)
